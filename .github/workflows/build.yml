@@ -37,6 +37,12 @@ jobs:
           vcs import "$DEPS_WS" < dep.repos
           git -C "$DEPS_WS/pinocchio" submodule update --init --recursive
 
+      - name: Handle header-only Boost.System on Ubuntu 26.04
+        if: matrix.ubuntu == '26.04'
+        run: |
+          sed -i 's/set(BOOST_REQUIRED_COMPONENTS filesystem serialization system)/set(BOOST_REQUIRED_COMPONENTS filesystem serialization)/' \
+            "$DEPS_WS/pinocchio/CMakeLists.txt"
+
       - name: Build and install pinocchio
         run: |
           cmake -S "$DEPS_WS/pinocchio" -B "$DEPS_WS/build/pinocchio" \
