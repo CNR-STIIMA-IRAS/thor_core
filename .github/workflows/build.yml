@@ -42,6 +42,13 @@ jobs:
         run: |
           sed -i 's/set(BOOST_REQUIRED_COMPONENTS filesystem serialization system)/set(BOOST_REQUIRED_COMPONENTS filesystem serialization)/' \
             "$DEPS_WS/pinocchio/CMakeLists.txt"
+          sed -i \
+            -e 's/find_package(Boost REQUIRED COMPONENTS system filesystem)/find_package(Boost REQUIRED COMPONENTS filesystem)/' \
+            -e '/^[[:space:]]*Boost::system[[:space:]]*$/d' \
+            "$DEPS_WS/rdyn_core/rdyn_core/CMakeLists.txt"
+          sed -i \
+            's/find_dependency(Boost REQUIRED COMPONENTS system filesystem)/find_dependency(Boost REQUIRED COMPONENTS filesystem)/' \
+            "$DEPS_WS/rdyn_core/rdyn_core/cmake_config/rdyn_coreConfig.cmake"
 
       - name: Build and install pinocchio
         run: |
