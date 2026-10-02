@@ -1,6 +1,5 @@
 *~
 
-
 # File generato da KDevelop
 *.kdev4
 *.swp
@@ -11,3 +10,7 @@ build/
 *.txt.user
 *.user
 *.user*
+
+.vscode/
+.agents/
+.codex/
