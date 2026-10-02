@@ -1,28 +1,21 @@
 <?xml version="1.0"?>
 <package format="2">
   <name>thor_math</name>
-  <version>0.0.0</version>
+  <version>0.1.0</version>
   <description>The thor_math package</description>
 
-  <!-- One maintainer tag required, multiple allowed, one person per tag -->
-  <!-- Example:  -->
-  <!-- <maintainer email="iras@itia.cnr.it">Jane Doe</maintainer> -->
-  <maintainer email="iras@itia.cnr.it">maxwell</maintainer>
+
+  <maintainer email="manuel.beschi@unibs.it">Manuel Beschi</maintainer>
+  <maintainer email="nicola.pedrocchi@cnr.it">Nicola Pedrocchi</maintainer>
 
 
-  <!-- One license tag required, multiple allowed, one license per tag -->
-  <!-- Commonly used license strings: -->
-  <!--   BSD, MIT, Boost Software License, GPLv2, GPLv3, LGPLv2.1, LGPLv3 -->
-  <license>TODO</license>
-
+  <license>BSD-3-Clause</license>
 
   <buildtool_depend>cmake</buildtool_depend>
   <depend>eigen</depend>
-  <depend>eigen_matrix_utils</depend>
   <depend>boost</depend>
   <depend>urdfdom</depend>
   <depend>urdfdom_headers</depend>
-  <depend>rdyn_core</depend>
   <depend>pinocchio</depend>
 
   <!-- The export tag contains other, unspecified, tags -->

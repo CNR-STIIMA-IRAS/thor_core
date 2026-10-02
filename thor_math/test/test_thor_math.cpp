@@ -20,7 +20,7 @@ protected:
   {
     const std::filesystem::path urdf =
       std::filesystem::path(THOR_MATH_TEST_DATA_DIR) /
-      "ur10" / "ur10_with_intermediates.urdf";
+      "data" / "ur10" / "ur10_with_intermediates.urdf";
 
     ASSERT_TRUE(std::filesystem::is_regular_file(urdf))
       << "Missing test URDF: " << urdf;

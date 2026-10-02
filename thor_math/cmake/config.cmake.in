@@ -2,9 +2,7 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(Eigen3 REQUIRED COMPONENTS Core Dense Geometry)
-find_dependency(eigen_matrix_utils REQUIRED CONFIG)
 find_dependency(pinocchio REQUIRED CONFIG)
-find_dependency(rdyn_core REQUIRED CONFIG)
 
 include("${CMAKE_CURRENT_LIST_DIR}/thor_mathTargets.cmake")
 check_required_components(thor_math)

@@ -664,8 +664,6 @@ namespace math
     //     Eigen::VectorXd qc  = m_prediction_pos.block(ic*m_nax,0,m_nax,1);
     //     Eigen::VectorXd Dqc = m_prediction_vel.block(ic*m_nax,0,m_nax,1);
         
-    //     // Eigen::VectorXd non_linear_part_torque=m_chain->getJointTorqueNonLinearPart(qc,Dqc);
-    //     // Eigen::MatrixXd inertia_matrix = m_chain->getJointInertia(qc);
         
     //     m_H_variable.block(ic*m_nax,ic*m_nax,m_nax,m_nax) += m_lambda_tau * inertia_matrix.transpose()*inertia_matrix;
     //     m_f.block(ic*m_nax,0,m_nax,1)                     += m_lambda_tau * non_linear_part_torque.transpose()*inertia_matrix;
@@ -737,8 +735,6 @@ namespace math
     // {
     //   for (unsigned int idx=0;idx<m_nc;idx++)
     //   {
-    //     // m_CI.block(idx*m_nc,8*m_nc*m_nax+2*m_nc,m_nax,m_nax)=m_chain->getJointInertia(m_prediction_pos.segment(idx*m_nax,m_nax)); // update torque constraints
-    //     Eigen::VectorXd torque_nonlinear_part=m_chain->getJointTorqueNonLinearPart(m_prediction_pos.segment(idx*m_nax,m_nax),m_prediction_vel.segment(idx*m_nax,m_nax));
     //     ci0.segment(2*m_nc*(m_nax+1)+6*m_nax*m_nc+idx*m_nc,m_nax)+=torque_nonlinear_part; // torque lower bounds
     //     ci0.segment(2*m_nc*(m_nax+1)+7*m_nax*m_nc+idx*m_nc,m_nax)-=torque_nonlinear_part; // torque upper bounds
     //   }
@@ -945,7 +941,7 @@ namespace math
     // std::cout << "Sol is nan? " << (double)(sol==sol) << std::endl;
     // std::cout << "NAN is nan? " << std::isnan(NAN) << std::endl;
 
-    if (std::to_string(sol) == "nan" or std::to_string(sol) == "inf" or std::to_string(sol) == "-inf")
+    if (!std::isfinite(sol))
     {
      throw std::runtime_error("Problem is not feasible. Check the constraints and the target values.");
     }
@@ -1005,12 +1001,6 @@ namespace math
       return empty;
     }
   }
-
-// void ThorQP::setDynamicsChain(const rdyn::ChainPtr& chain)
-// {
-//   m_chain=chain;
-// }
-
 
 }
 }

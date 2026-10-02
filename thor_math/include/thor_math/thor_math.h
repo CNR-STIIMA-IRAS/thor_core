@@ -33,14 +33,13 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __thor_math__
-#define __thor_math__
+#ifndef THOR_MATH__THOR_MATH__THOR_MATH__H
+#define THOR_MATH__THOR_MATH__THOR_MATH__H
 
 
-#include "Eigen/Dense"
+#include <Eigen/Dense>
 #include <eigen_matrix_utils/eiquadprog.hpp>
 #include <iostream>
-#include <rdyn_core/primitives.h>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/frames.hpp>
@@ -159,7 +158,6 @@ class ThorQP
     double             m_gamma;           // CBF gain
     double             m_h;               // barrier value
     int                m_num_ph;          // number of human points considered  
-    rdyn::ChainPtr  m_chain;
     std::vector<unsigned int> m_frameIds;
 
     bool m_use_cbf_move_away = false; // if true, the CBF will try to mantain safaty distance also when the robot is moving away
@@ -346,11 +344,10 @@ class ThorQP
     Eigen::VectorXd getFirstPredictionVel();
     double getDt(){return m_dt;};
     double getNumPh(){return m_num_ph;};
-  // void setDynamicsChain(const rdyn::ChainPtr& chain);
   // ThorQP clone();
 };
 
-}
-}
+}  // namespace math
+}  // namespace thor
 
-#endif
+#endif  // THOR_MATH__THOR_MATH__THOR_MATH__H

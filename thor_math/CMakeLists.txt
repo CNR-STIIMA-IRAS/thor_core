@@ -29,9 +29,7 @@ option(BUILD_UNIT_TESTS "Build the unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build the integration test executable" OFF)
 
 find_package(Eigen3 REQUIRED COMPONENTS Core Dense Geometry)
-find_package(eigen_matrix_utils REQUIRED CONFIG)
 find_package(pinocchio REQUIRED CONFIG)
-find_package(rdyn_core REQUIRED CONFIG)
 
 add_library(thor_math SHARED src/thor_math/thor_math.cpp)
 add_library(thor_math::thor_math ALIAS thor_math)
@@ -44,7 +42,7 @@ set_target_properties(thor_math PROPERTIES
   SOVERSION "${PROJECT_VERSION_MAJOR}"
 )
 
-target_include_directories(thor_math
+target_include_directories(thor_math BEFORE
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
@@ -53,9 +51,7 @@ target_include_directories(thor_math
 target_link_libraries(thor_math
   PUBLIC
     Eigen3::Eigen
-    eigen_matrix_utils::eigen_matrix_utils
     pinocchio::pinocchio
-    rdyn_core::rdyn_core
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -78,6 +74,8 @@ if(BUILD_UNIT_TESTS OR BUILD_INTEGRATION_TESTS)
 endif()
 
 if(BUILD_UNIT_TESTS)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
   add_executable(thor_math_unit_tests test/test_evolution.cpp)
   target_link_libraries(thor_math_unit_tests
     PRIVATE
@@ -86,6 +84,13 @@ if(BUILD_UNIT_TESTS)
   )
   gtest_discover_tests(thor_math_unit_tests
     TEST_PREFIX "thor_math.unit."
+  )
+
+  add_test(
+    NAME thor_math.unit.python_tools
+    COMMAND "${Python3_EXECUTABLE}" -m unittest
+      discover -s "${CMAKE_CURRENT_SOURCE_DIR}/test"
+      -p "test_python_tools.py" -v
   )
 endif()
 
@@ -122,6 +127,23 @@ install(TARGETS thor_math
 install(DIRECTORY include/thor_math
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+install(DIRECTORY include/eigen_matrix_utils
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+install(DIRECTORY include/qpmad
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+install(FILES
+  third_party/qpmad/LICENSE
+  third_party/qpmad/NOTICE
+  third_party/qpmad/VERSION
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME}/third_party/qpmad"
 )
 
 configure_package_config_file(
