@@ -6,164 +6,124 @@
 # Copyright (c) Federico Parma (federico.parma@unibs.it)
 # All rights reserved.
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-# 1. Redistributions of source code must retain the above copyright notice, this
-#    list of conditions and the following disclaimer.
-#
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-#    this list of conditions and the following disclaimer in the documentation
-#    and/or other materials provided with the distribution.
-#
-# 3. Neither the name of the copyright holder nor the names of its
-#    contributors may be used to endorse or promote products derived from
-#    this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# See the project license for redistribution terms and warranty disclaimer.
 
 cmake_minimum_required(VERSION 3.16.3)
-project(thor_math)
 
-set(CMAKE_BUILD_TYPE "Release")
-# Dependencies
-find_package(Eigen3 REQUIRED  COMPONENTS Core Dense Geometry)
-find_package(rdyn_core REQUIRED)
-find_package(pinocchio REQUIRED)
-
-# Libraries (SHARED: dynamic .so/.dll)
-add_library(${PROJECT_NAME} SHARED
-  src/${PROJECT_NAME}/thor_math.cpp # list of source files
-  )
-
-target_link_libraries(${PROJECT_NAME}  PUBLIC
-  Eigen3::Eigen
-  rdyn_core::rdyn_core
-  pinocchio::pinocchio
-)
-
-if(CMAKE_COMPILER_IS_GNUCXX)
-  include(CheckCXXCompilerFlag)
-
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "10.0")
-    target_compile_options(${PROJECT_NAME} PUBLIC -std=c++20 -funroll-loops -Ofast)
-  else()
-    target_compile_options(${PROJECT_NAME} PUBLIC -std=c++2a -funroll-loops -Ofast)
-  endif()
+# Keep the package.xml version as the single source of truth.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/package.xml" THOR_MATH_PACKAGE_XML)
+string(REGEX MATCH "<version>([0-9]+[.][0-9]+[.][0-9]+)</version>"
+  _version_match "${THOR_MATH_PACKAGE_XML}")
+if(NOT CMAKE_MATCH_1)
+  message(FATAL_ERROR "Could not read the project version from package.xml")
 endif()
 
+project(thor_math VERSION "${CMAKE_MATCH_1}" LANGUAGES CXX)
 
-target_include_directories(${PROJECT_NAME} PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
+option(BUILD_UNIT_TESTS "Build the unit tests" OFF)
+option(BUILD_INTEGRATION_TESTS "Build the integration test executable" OFF)
+
+find_package(Eigen3 REQUIRED COMPONENTS Core Dense Geometry)
+find_package(eigen_matrix_utils REQUIRED CONFIG)
+find_package(pinocchio REQUIRED CONFIG)
+find_package(rdyn_core REQUIRED CONFIG)
+
+add_library(thor_math SHARED src/thor_math/thor_math.cpp)
 add_library(thor_math::thor_math ALIAS thor_math)
 
+target_compile_features(thor_math PUBLIC cxx_std_20)
+set_target_properties(thor_math PROPERTIES
+  CXX_EXTENSIONS OFF
+  POSITION_INDEPENDENT_CODE ON
+  VERSION "${PROJECT_VERSION}"
+  SOVERSION "${PROJECT_VERSION_MAJOR}"
+)
 
-#add_executable(test_evolution_matrix src/test_evolution_matrix.cpp)
-#add_dependencies(test_evolution_matrix ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-#target_link_libraries(test_evolution_matrix
-#  ${PROJECT_NAME}
-#  ${catkin_LIBRARIES}
-#  )
-
-
-#add_executable(test_thor_math src/test_thor_math.cpp)
-#target_link_libraries(test_thor_math
-#  PUBLIC
-#  "${PROJECT_NAME}::${PROJECT_NAME}"
-#  )
-
-add_executable(test_thor_math2
-  src/test_thor_math2.cpp)
-
-target_link_libraries(test_thor_math2
+target_include_directories(thor_math
   PUBLIC
-  thor_math::thor_math
-  pinocchio::pinocchio
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+)
+
+target_link_libraries(thor_math
+  PUBLIC
+    Eigen3::Eigen
+    eigen_matrix_utils::eigen_matrix_utils
+    pinocchio::pinocchio
+    rdyn_core::rdyn_core
+)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(thor_math PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wunreachable-code
+    "$<$<CONFIG:Release>:-O3>"
   )
+elseif(MSVC)
+  target_compile_options(thor_math PRIVATE /W4)
+endif()
 
+if(BUILD_UNIT_TESTS OR BUILD_INTEGRATION_TESTS)
+  include(CTest)
+  enable_testing()
+endif()
 
-#add_executable(test_thor_math2 src/test_thor_math2.cpp)
-#add_dependencies(test_thor_math2 ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-#target_link_libraries(test_thor_math2
-#  ${PROJECT_NAME}
-#  ${catkin_LIBRARIES}
-#  )
+if(BUILD_UNIT_TESTS)
+  add_executable(thor_math_unit_tests test/test_evolution.cpp)
+  target_link_libraries(thor_math_unit_tests PRIVATE thor_math::thor_math)
+  add_test(NAME thor_math.unit COMMAND thor_math_unit_tests)
+endif()
 
-#add_executable(test_thor_clik src/test_thor_clik.cpp)
-#add_dependencies(test_thor_clik ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-#target_link_libraries(test_thor_clik
-#  ${PROJECT_NAME}
-#  ${catkin_LIBRARIES}
-#  )
+if(BUILD_INTEGRATION_TESTS)
+  add_executable(thor_math_integration_test test/test_thor_math2.cpp)
+  target_link_libraries(thor_math_integration_test PRIVATE thor_math::thor_math)
+  # This program needs a robot URDF and is intentionally not registered with
+  # CTest until it accepts its runtime inputs instead of hard-coded paths.
+endif()
 
+set(THOR_MATH_INSTALL_CMAKEDIR
+  "${CMAKE_INSTALL_DATADIR}/${PROJECT_NAME}/cmake"
+  CACHE STRING "Install directory for thor_math CMake package files"
+)
 
-#################
-## END - Build ##
-#################
-
-### #############
-### ## Install ##
-### #############
-
-# Installation instructions for the thor_math library and its dependencies
-
-# Install header files from the include/thor_math directory to the include directory
-install(DIRECTORY include/thor_math
-  DESTINATION include)
-
-# Install the thor_math library target to appropriate system locations:
-# - Archive files (static libraries) to lib
-# - Shared libraries to lib
-# - Executable binaries to bin
-install(
-  TARGETS thor_math test_thor_math2
+install(TARGETS thor_math
   EXPORT thor_mathTargets
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
+  ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+  INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
 )
 
-# Export thor_mathTargets to enable other CMake projects to import this library
-# thor_mathTargets.cmake will be generated and placed in share/thor_math/cmake
+install(DIRECTORY include/thor_math
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+configure_package_config_file(
+  cmake/config.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/thor_mathConfig.cmake"
+  INSTALL_DESTINATION "${THOR_MATH_INSTALL_CMAKEDIR}"
+)
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/thor_mathConfigVersion.cmake"
+  VERSION "${PROJECT_VERSION}"
+  COMPATIBILITY SameMajorVersion
+)
+
 install(EXPORT thor_mathTargets
-  DESTINATION "share/thor_math/cmake"
-  NAMESPACE thor_math::
   FILE thor_mathTargets.cmake
+  NAMESPACE thor_math::
+  DESTINATION "${THOR_MATH_INSTALL_CMAKEDIR}"
 )
 
-# Generate a version file (thor_mathConfigVersion.cmake) to enable version checking
-# during library import and specify compatibility with any newer version
-include(CMakePackageConfigHelpers)
-write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/thor_mathConfigVersion.cmake
-  VERSION 0.0.1
-  COMPATIBILITY AnyNewerVersion)
-
-# Install the configuration files to allow importing thor_math in CMake projects
 install(FILES
-  ${CMAKE_SOURCE_DIR}/cmake_config/thor_mathConfig.cmake
-  ${CMAKE_CURRENT_BINARY_DIR}/thor_mathConfigVersion.cmake
-  DESTINATION "share/thor_math/cmake")
-
-# Custom uninstall target to remove installed files
-# The uninstall command uses install_manifest.txt to track and delete installed files
-# If no files are listed in install_manifest.txt, an informative message is printed
-add_custom_target("uninstall" COMMENT "Uninstall installed files")
-add_custom_command(
-    TARGET "uninstall"
-    POST_BUILD
-    COMMENT "Uninstall files with install_manifest.txt"
-    COMMAND xargs rm -vf < install_manifest.txt || echo Nothing in
-            install_manifest.txt to be uninstalled!
+  "${CMAKE_CURRENT_BINARY_DIR}/thor_mathConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/thor_mathConfigVersion.cmake"
+  DESTINATION "${THOR_MATH_INSTALL_CMAKEDIR}"
 )

@@ -809,13 +809,13 @@ namespace math
           // std::cout << "Jacobian computed" << std::endl;
 
           //--------------------- COMPUTATION OF HUMAN DEPENDANT TERMS ------------------------
-          for (size_t k = 0; k < m_num_ph; ++k)
+          for (size_t k = 0; k < static_cast<size_t>(m_num_ph); ++k)
           {
             Eigen::RowVector2d f, partial_h_on_x;
             Eigen::Vector3d d_vec, e_rh, p_h;
             Eigen::RowVectorXd L_g, A_barrier;
 
-            double d, v_rel, vh_proj, d_min, L_f, b_barrier, eta;
+            double d, v_rel, vh_proj, L_f, b_barrier;
             std::vector<double> theta(2);
             
             Eigen::Vector3d p_h_init = p_h_vector[k]; // human position of k-esim point

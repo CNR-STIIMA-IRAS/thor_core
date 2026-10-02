@@ -18,6 +18,7 @@
 
   <buildtool_depend>cmake</buildtool_depend>
   <depend>eigen</depend>
+  <depend>eigen_matrix_utils</depend>
   <depend>boost</depend>
   <depend>urdfdom</depend>
   <depend>urdfdom_headers</depend>
