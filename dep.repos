@@ -8,3 +8,7 @@ repositories:
     type: git
     url: https://github.com/CNR-STIIMA-IRAS/rosdyn
     version: modern_cmake
+  cnr_control_toolbox:
+    type: git
+    url: https://github.com/CNR-STIIMA-IRAS/cnr_control_toolbox
+    version: modern_cmake

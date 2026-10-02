@@ -52,6 +52,14 @@ jobs:
           cmake --build "$DEPS_WS/build/pinocchio" -j"$(nproc)"
           cmake --install "$DEPS_WS/build/pinocchio"
 
+      - name: Build and install cnr_control_toolbox
+        run: |
+          cmake -S "$DEPS_WS/cnr_control_toolbox" -B "$DEPS_WS/build/cnr_control_toolbox" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DENABLE_TESTING=OFF -DBUILD_EXAMPLES=OFF
+          cmake --build "$DEPS_WS/build/cnr_control_toolbox" -j"$(nproc)"
+          cmake --install "$DEPS_WS/build/cnr_control_toolbox"
+
       - name: Build and install rdyn_core
         run: |
           cmake -S "$DEPS_WS/rdyn_core/rdyn_core" -B "$DEPS_WS/build/rdyn_core" \
