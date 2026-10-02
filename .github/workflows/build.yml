@@ -26,7 +26,7 @@ jobs:
       - name: Install recent CMake and vcstool
         run: |
           python3 -m venv "$DEPS_WS/venv"
-          "$DEPS_WS/venv/bin/pip" install --upgrade cmake vcstool
+          "$DEPS_WS/venv/bin/pip" install --upgrade cmake vcstool "setuptools<81"
           echo "$DEPS_WS/venv/bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@v4
