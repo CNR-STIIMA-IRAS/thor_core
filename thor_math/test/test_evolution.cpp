@@ -1,46 +1,55 @@
+#include <gtest/gtest.h>
+
 #include <thor_math/thor_math.h>
 
-#include <cmath>
-#include <iostream>
-
+namespace thor::math {
 namespace {
 
-bool approximately_equal(double lhs, double rhs, double tolerance = 1e-12)
+TEST(EvolutionMatrix, FreeAndForcedResponsesHaveExpectedShapeAndValues)
 {
-  return std::abs(lhs - rhs) <= tolerance;
+  constexpr unsigned int axes = 2;
+  const Eigen::MatrixXd free = freeResponse(0.5, axes);
+  const Eigen::MatrixXd forced = forcedResponse(0.5, axes);
+
+  ASSERT_EQ(free.rows(), 4);
+  ASSERT_EQ(free.cols(), 4);
+  ASSERT_EQ(forced.rows(), 4);
+  ASSERT_EQ(forced.cols(), 2);
+
+  EXPECT_DOUBLE_EQ(free(0, 0), 1.0);
+  EXPECT_DOUBLE_EQ(free(0, 2), 0.5);
+  EXPECT_DOUBLE_EQ(forced(0, 0), 0.125);
+  EXPECT_DOUBLE_EQ(forced(2, 0), 0.5);
+}
+
+TEST(EvolutionMatrix, ConstantIntervalsCoverTheRequestedHorizon)
+{
+  Eigen::VectorXd intervals;
+  Eigen::VectorXd prediction;
+
+  ASSERT_TRUE(constantControlIntervals(1.0, 4, 0.05,
+                                       intervals, prediction));
+  ASSERT_EQ(intervals.size(), 4);
+  ASSERT_EQ(prediction.size(), 4);
+
+  for (Eigen::Index index = 0; index < intervals.size(); ++index) {
+    EXPECT_DOUBLE_EQ(intervals(index), 0.25);
+    EXPECT_DOUBLE_EQ(prediction(index), 0.25 * (index + 1));
+  }
+}
+
+TEST(EvolutionMatrix, RejectsEmptyPredictionOrControlVectors)
+{
+  Eigen::VectorXd prediction;
+  Eigen::VectorXd intervals;
+  Eigen::MatrixXd free;
+  Eigen::MatrixXd forced;
+
+  EXPECT_FALSE(computeEvolutionMatrix(prediction, intervals, 2, free, forced));
+
+  prediction = Eigen::VectorXd::Constant(1, 0.1);
+  EXPECT_FALSE(computeEvolutionMatrix(prediction, intervals, 2, free, forced));
 }
 
 }  // namespace
-
-int main()
-{
-  constexpr unsigned int axes = 2;
-  const Eigen::MatrixXd free = thor::math::freeResponse(0.5, axes);
-  const Eigen::MatrixXd forced = thor::math::forcedResponse(0.5, axes);
-
-  if (free.rows() != 4 || free.cols() != 4 ||
-      forced.rows() != 4 || forced.cols() != 2) {
-    std::cerr << "Unexpected evolution matrix dimensions\n";
-    return 1;
-  }
-
-  if (!approximately_equal(free(0, 0), 1.0) ||
-      !approximately_equal(free(0, 2), 0.5) ||
-      !approximately_equal(forced(0, 0), 0.125) ||
-      !approximately_equal(forced(2, 0), 0.5)) {
-    std::cerr << "Unexpected evolution matrix values\n";
-    return 1;
-  }
-
-  Eigen::VectorXd intervals;
-  Eigen::VectorXd prediction;
-  if (!thor::math::constantControlIntervals(1.0, 4, 0.05,
-                                            intervals, prediction) ||
-      intervals.size() != 4 || prediction.size() != 4 ||
-      !approximately_equal(prediction(3), 1.0)) {
-    std::cerr << "Constant control interval generation failed\n";
-    return 1;
-  }
-
-  return 0;
-}
+}  // namespace thor::math

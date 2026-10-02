@@ -23,6 +23,8 @@ project(thor_math VERSION "${CMAKE_MATCH_1}" LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 option(BUILD_UNIT_TESTS "Build the unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build the integration test executable" OFF)
 
@@ -71,19 +73,37 @@ endif()
 if(BUILD_UNIT_TESTS OR BUILD_INTEGRATION_TESTS)
   include(CTest)
   enable_testing()
+  find_package(GTest REQUIRED CONFIG)
+  include(GoogleTest)
 endif()
 
 if(BUILD_UNIT_TESTS)
   add_executable(thor_math_unit_tests test/test_evolution.cpp)
-  target_link_libraries(thor_math_unit_tests PRIVATE thor_math::thor_math)
-  add_test(NAME thor_math.unit COMMAND thor_math_unit_tests)
+  target_link_libraries(thor_math_unit_tests
+    PRIVATE
+      thor_math::thor_math
+      GTest::gtest_main
+  )
+  gtest_discover_tests(thor_math_unit_tests
+    TEST_PREFIX "thor_math.unit."
+  )
 endif()
 
 if(BUILD_INTEGRATION_TESTS)
-  add_executable(thor_math_integration_test test/test_thor_math2.cpp)
-  target_link_libraries(thor_math_integration_test PRIVATE thor_math::thor_math)
-  # This program needs a robot URDF and is intentionally not registered with
-  # CTest until it accepts its runtime inputs instead of hard-coded paths.
+  add_executable(thor_math_integration_test test/test_thor_math.cpp)
+  target_link_libraries(thor_math_integration_test
+    PRIVATE
+      thor_math::thor_math
+      GTest::gtest_main
+  )
+  target_compile_definitions(thor_math_integration_test
+    PRIVATE
+      THOR_MATH_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test"
+  )
+  gtest_discover_tests(thor_math_integration_test
+    TEST_PREFIX "thor_math.integration."
+    DISCOVERY_TIMEOUT 30
+  )
 endif()
 
 set(THOR_MATH_INSTALL_CMAKEDIR
