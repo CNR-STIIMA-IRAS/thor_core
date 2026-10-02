@@ -20,11 +20,14 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential git ca-certificates python3 python3-pip \
+            build-essential git ca-certificates python3 python3-pip python3-venv \
             libeigen3-dev libboost-all-dev liburdfdom-dev liburdfdom-headers-dev
 
       - name: Install recent CMake and vcstool
-        run: pip3 install --upgrade cmake vcstool
+        run: |
+          python3 -m venv "$DEPS_WS/venv"
+          "$DEPS_WS/venv/bin/pip" install --upgrade cmake vcstool
+          echo "$DEPS_WS/venv/bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@v4
 
