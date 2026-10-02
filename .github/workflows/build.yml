@@ -1,0 +1,57 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ubuntu:${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["20.04", "24.04", "26.04"]
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      DEPS_WS: /opt/deps
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential git ca-certificates python3 python3-pip \
+            libeigen3-dev libboost-all-dev liburdfdom-dev liburdfdom-headers-dev
+
+      - name: Install recent CMake and vcstool
+        run: pip3 install --upgrade cmake vcstool
+
+      - uses: actions/checkout@v4
+
+      - name: Fetch source dependencies
+        run: |
+          mkdir -p "$DEPS_WS"
+          vcs import "$DEPS_WS" < dep.repos
+          git -C "$DEPS_WS/pinocchio" submodule update --init --recursive
+
+      - name: Build and install pinocchio
+        run: |
+          cmake -S "$DEPS_WS/pinocchio" -B "$DEPS_WS/build/pinocchio" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTING=OFF -DBUILD_PYTHON_INTERFACE=OFF \
+            -DBUILD_WITH_COLLISION_SUPPORT=OFF -DBUILD_BENCHMARK=OFF
+          cmake --build "$DEPS_WS/build/pinocchio" -j"$(nproc)"
+          cmake --install "$DEPS_WS/build/pinocchio"
+
+      - name: Build and install rdyn_core
+        run: |
+          cmake -S "$DEPS_WS/rdyn_core" -B "$DEPS_WS/build/rdyn_core" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build "$DEPS_WS/build/rdyn_core" -j"$(nproc)"
+          cmake --install "$DEPS_WS/build/rdyn_core"
+
+      - name: Build thor_math
+        run: |
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+          cmake -S thor_math -B build/thor_math -DCMAKE_PREFIX_PATH=/usr/local
+          cmake --build build/thor_math -j"$(nproc)"
