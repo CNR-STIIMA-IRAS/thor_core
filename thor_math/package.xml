@@ -17,6 +17,10 @@
 
 
   <buildtool_depend>cmake</buildtool_depend>
+  <depend>eigen</depend>
+  <depend>boost</depend>
+  <depend>urdfdom</depend>
+  <depend>urdfdom_headers</depend>
   <depend>rdyn_core</depend>
   <depend>pinocchio</depend>
 
