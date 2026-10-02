@@ -54,7 +54,7 @@ jobs:
 
       - name: Build and install rdyn_core
         run: |
-          cmake -S "$DEPS_WS/rdyn_core" -B "$DEPS_WS/build/rdyn_core" \
+          cmake -S "$DEPS_WS/rdyn_core/rdyn_core" -B "$DEPS_WS/build/rdyn_core" \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
           cmake --build "$DEPS_WS/build/rdyn_core" -j"$(nproc)"
           cmake --install "$DEPS_WS/build/rdyn_core"
