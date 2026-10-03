@@ -3,12 +3,3 @@ repositories:
     type: git
     url: https://github.com/stack-of-tasks/pinocchio.git
     version: v3.3.1
-  # TODO: set the real rdyn_core URL and version
-  rdyn_core:
-    type: git
-    url: https://github.com/CNR-STIIMA-IRAS/rosdyn
-    version: modern_cmake
-  cnr_control_toolbox:
-    type: git
-    url: https://github.com/CNR-STIIMA-IRAS/cnr_control_toolbox
-    version: master

@@ -28,7 +28,7 @@ With rosdep, system dependencies declared in [thor_math/package.xml](thor_math/p
 rosdep install --from-paths [src_of_your_ws] --ignore-src -r -y 
 ```
 
-`rdyn_core` is not a rosdep key and, depending on your ROS distribution, neither is `pinocchio`: build them from [dep.repos](dep.repos).
+Depending on your ROS distribution, `pinocchio` may not be available as a rosdep key; it can be built from [dep.repos](dep.repos).
 
 ## Build
 
