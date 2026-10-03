@@ -32,7 +32,7 @@ jobs:
       - name: Fetch source dependencies
         run: |
           mkdir -p "$DEPS_WS"
-          vcs import "$DEPS_WS" < dep.repos
+          vcs import "$DEPS_WS" < .repos
           git -C "$DEPS_WS/pinocchio" submodule update --init --recursive
 
       - name: Build and install pinocchio
@@ -109,8 +109,7 @@ jobs:
         run: |
           lcov --capture --directory build/coverage --output-file coverage.info
           lcov --remove coverage.info \
-            '/usr/*' '*/test/*' '*/include/qpmad/*' \
-            '*/include/eigen_matrix_utils/*' \
+            '/usr/*' '*/include/qpmad/*' \
             --output-file coverage.info
           lcov --list coverage.info
 
