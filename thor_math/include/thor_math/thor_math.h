@@ -187,6 +187,7 @@ class ThorQP
 
         m_H = other.m_H;
         m_f = other.m_f;
+        m_sol = other.m_sol;
 
         m_ub = other.m_ub;
         m_lb = other.m_lb;
@@ -248,13 +249,7 @@ class ThorQP
         m_frameIds = other.m_frameIds;
         m_h = other.m_h;
         m_num_ph = other.m_num_ph;
-
-        setIntervals(m_nc, m_nax, m_control_horizon_time, m_dt);         // CHECK THIS LINE
-
-        std::cout << "CLONING THORQP " << id << std::endl;
-        std::cout<< "m_nax " << m_nax << std::endl;
-        std::cout<< "m_nc " << m_nc << std::endl;
-        std::cout<< "m_sol" << m_sol.transpose() << std::endl;
+        m_use_cbf_move_away = other.m_use_cbf_move_away;
 
       }
       return *this;

@@ -201,11 +201,27 @@ namespace math
   }
 
   ThorQP::ThorQP()
+    : m_are_matrices_updated(false),
+      m_use_input_blocking(true),
+      m_are_position_bounds_active(false),
+      m_are_torque_bounds_active(false),
+      m_nc(0),
+      m_nax(0),
+      m_control_horizon_time(0.0),
+      m_dt(0.0),
+      m_lambda_acc(0.0),
+      m_lambda_tau(0.0),
+      m_lambda_scaling(0.0),
+      m_lambda_clik(0.0),
+      m_lambda_jerk(0.0),
+      m_use_cbf(false),
+      m_a_s(0.0),
+      m_T_r(0.0),
+      m_C(0.0),
+      m_gamma(0.0),
+      m_h(0.0),
+      m_num_ph(0)
   {
-    m_are_matrices_updated=false;
-    m_are_position_bounds_active=false;
-    m_are_torque_bounds_active=false;
-    m_use_cbf=false;
   }
 
   void ThorQP::compute_h(const double& v_h, const double& v_r, const double& d, double& h)
@@ -367,7 +383,7 @@ namespace math
 
   void ThorQP::activateTorqueBounds(const bool enable_tau_bounds)
   {
-    if (m_are_position_bounds_active!=enable_tau_bounds)
+    if (m_are_torque_bounds_active!=enable_tau_bounds)
     {
       m_are_torque_bounds_active=enable_tau_bounds;
       m_are_matrices_updated=false;
@@ -636,6 +652,7 @@ namespace math
     
     m_prediction_pos.resize(m_nax*m_nc);
     m_prediction_vel.resize(m_nax*m_nc);
+    m_are_matrices_updated=true;
   }
 
   void ThorQP::computeActualMatrices ( const Eigen::VectorXd& targetDq, const Eigen::VectorXd& next_targetQ, const double& target_scaling, const Eigen::VectorXd& x0 )

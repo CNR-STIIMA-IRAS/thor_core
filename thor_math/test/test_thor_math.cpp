@@ -114,5 +114,85 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   EXPECT_TRUE(qp.getState().allFinite());
 }
 
+TEST_F(ThorQpIntegrationTest, ComputesConstrainedStepWithoutCbf)
+{
+  constexpr unsigned int intervals = 4;
+  constexpr double horizon = 0.2;
+  constexpr double sampling_period = 0.01;
+  const auto axes = static_cast<unsigned int>(model_.nv);
+
+  ThorQP qp;
+  qp.setPinocchioModel(model_);
+  qp.setIntervals(intervals, axes, horizon, sampling_period, false);
+  qp.setConstraints(Eigen::VectorXd::Constant(axes, std::numbers::pi),
+                    Eigen::VectorXd::Constant(axes, -std::numbers::pi),
+                    Eigen::VectorXd::Constant(axes, 2.0),
+                    Eigen::VectorXd::Constant(axes, 20.0),
+                    Eigen::VectorXd::Constant(axes, 100.0));
+  qp.setWeigthFunction(1e-4, 0.0, 1e-4, 10.0, 10.0);
+  qp.setCBFParameters(2.5, 0.15, 0.5, 3.0);
+  qp.setCbfIds({}, 0);
+  qp.activatePositionBounds(false);
+  qp.activateTorqueBounds(false);
+  qp.activateCbfBounds(false);
+  ASSERT_NO_THROW(qp.updateMatrices());
+
+  Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
+  qp.setInitialState(state);
+  Eigen::VectorXd acceleration;
+  double scaling = 0.0;
+  std::vector<double> diagnostics;
+
+  ASSERT_NO_THROW(
+    diagnostics = qp.computedCostrainedSolution(
+      Eigen::VectorXd::Zero(axes * intervals),
+      Eigen::VectorXd::Zero(axes), 0.8, state,
+      acceleration, scaling));
+
+  EXPECT_EQ(diagnostics.size(), 6U);
+  ASSERT_EQ(acceleration.size(), axes);
+  EXPECT_TRUE(acceleration.allFinite());
+  EXPECT_TRUE(std::isfinite(scaling));
+  EXPECT_GE(scaling, 0.05 - 1e-8);
+  EXPECT_LE(scaling, 1.01 + 1e-8);
+  EXPECT_EQ(qp.getFirstPredictionPos().size(), axes);
+  EXPECT_EQ(qp.getFirstPredictionVel().size(), axes);
+  EXPECT_TRUE(qp.getFirstPredictionPos().allFinite());
+  EXPECT_TRUE(qp.getFirstPredictionVel().allFinite());
+}
+
+TEST_F(ThorQpIntegrationTest, CopiesConfiguredOptimizer)
+{
+  const auto axes = static_cast<unsigned int>(model_.nv);
+  ThorQP original;
+  original.setPinocchioModel(model_);
+  original.setIntervals(3, axes, 0.15, 0.01);
+  original.setConstraints(Eigen::VectorXd::Constant(axes, 2.0),
+                          Eigen::VectorXd::Constant(axes, -2.0),
+                          Eigen::VectorXd::Constant(axes, 3.0),
+                          Eigen::VectorXd::Constant(axes, 30.0),
+                          Eigen::VectorXd::Constant(axes, 100.0));
+  original.setWeigthFunction(1e-3, 0.0, 0.0, 10.0, 1.0);
+  original.setCBFParameters(2.5, 0.15, 0.5, 3.0);
+  original.setCbfIds({}, 0);
+  original.updateMatrices();
+
+  ThorQP copy;
+  ASSERT_NO_THROW(copy = original);
+  EXPECT_FALSE(copy.needUpdate());
+  EXPECT_DOUBLE_EQ(copy.getDt(), original.getDt());
+  EXPECT_DOUBLE_EQ(copy.getNumPh(), original.getNumPh());
+
+  const Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
+  copy.setInitialState(state);
+  Eigen::VectorXd acceleration;
+  double scaling = 0.0;
+  ASSERT_TRUE(copy.computedUncostrainedSolution(
+    Eigen::VectorXd::Zero(3 * axes), Eigen::VectorXd::Zero(axes),
+    1.0, state, acceleration, scaling));
+  EXPECT_TRUE(acceleration.allFinite());
+  EXPECT_TRUE(std::isfinite(scaling));
+}
+
 }  // namespace
 }  // namespace thor::math

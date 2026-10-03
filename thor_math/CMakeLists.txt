@@ -27,6 +27,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_UNIT_TESTS "Build the unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build the integration test executable" OFF)
+option(ENABLE_COVERAGE "Enable source-based test coverage instrumentation" OFF)
 
 find_package(Eigen3 REQUIRED COMPONENTS Core Dense Geometry)
 find_package(pinocchio REQUIRED CONFIG)
@@ -53,6 +54,15 @@ target_link_libraries(thor_math
     Eigen3::Eigen
     pinocchio::pinocchio
 )
+
+if(ENABLE_COVERAGE)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(thor_math PRIVATE -O0 -g --coverage)
+    target_link_options(thor_math PRIVATE --coverage)
+  else()
+    message(FATAL_ERROR "ENABLE_COVERAGE requires GCC or Clang")
+  endif()
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(thor_math PRIVATE
