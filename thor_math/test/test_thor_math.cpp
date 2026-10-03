@@ -168,7 +168,9 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   EXPECT_TRUE(qp.getState().allFinite());
 
   // Far-away humans select the reduced-constraint branch. Its result must
-  // match the same configured optimizer with CBF disabled.
+  // match the same configured optimizer with CBF disabled, including offsets
+  // from a nonzero initial velocity.
+  initial_state.tail(axes).setConstant(0.01);
   qp.setInitialState(initial_state);
   InspectableOptimizer without_cbf;
   without_cbf = qp;
