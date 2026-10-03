@@ -4,6 +4,7 @@
 
 #include <pinocchio/parsers/urdf.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <numbers>
@@ -12,6 +13,32 @@
 
 namespace thor::math {
 namespace {
+
+class InspectableOptimizer : public ThorQP
+{
+public:
+  const Eigen::VectorXd& solution() const { return m_sol; }
+  const Eigen::MatrixXd& inequalities() const { return m_CI; }
+  const Eigen::VectorXd& offsets() const { return m_ci0; }
+  const Eigen::VectorXd& positions() const { return m_prediction_pos; }
+  const Eigen::VectorXd& velocities() const { return m_prediction_vel; }
+  Eigen::VectorXd stateOffsets(const Eigen::VectorXd& state) const
+  {
+    Eigen::VectorXd result = m_ci0;
+    const Eigen::Index block = m_nc * m_nax;
+    const Eigen::Index start = 2 * m_nc * (m_nax + 1);
+    result.segment(start, block) += m_velocity_free_resp * state.tail(m_nax);
+    result.segment(start + block, block) -= m_velocity_free_resp * state.tail(m_nax);
+    if (m_are_position_bounds_active) {
+      result.segment(start + 2 * block, block) += m_position_free_resp * state;
+      result.segment(start + 3 * block, block) -= m_position_free_resp * state;
+      result.segment(start + 4 * block, block) += m_invariance_free_resp * state;
+      result.segment(start + 5 * block, block) -= m_invariance_free_resp * state;
+    }
+    return result;
+  }
+
+};
 
 class ThorQpIntegrationTest : public ::testing::Test
 {
@@ -52,7 +79,7 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   constexpr double sampling_period = 0.002;
   const auto axes = static_cast<unsigned int>(model_.nv);
 
-  ThorQP qp;
+  InspectableOptimizer qp;
   qp.setPinocchioModel(model_);
   qp.setIntervals(intervals, axes, horizon, sampling_period);
   qp.setCBFParameters(2.5, 0.15, 0.5, 3.0);
@@ -110,8 +137,58 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   EXPECT_TRUE(std::isfinite(scaling));
   EXPECT_FALSE(diagnostics.empty());
 
+  // The CBF is linearized at the initial stationary prediction. Independently
+  // reconstruct its offset gamma * max(0, distance - safety_distance).
+  pinocchio::Data data(model_);
+  pinocchio::forwardKinematics(model_, data, initial_position);
+  pinocchio::updateFramePlacements(model_, data);
+  const auto cbf_count = intervals * frame_ids.size();
+  const Eigen::Index first_cbf = qp.inequalities().cols() - cbf_count;
+  ASSERT_LT(diagnostics[0], 5.0);  // full-constraint solver branch
+  for (std::size_t frame = 0; frame < frame_ids.size(); ++frame) {
+    const double distance =
+      (data.oMf[frame_ids[frame]].translation() - human_position[0]).norm();
+    const double barrier = 3.0 * std::max(0.0, distance - 0.5);
+    const double offset = barrier == 0.0 ? 1e-6 : barrier;
+    for (unsigned int interval = 0; interval < intervals; ++interval) {
+      const Eigen::Index column = qp.inequalities().cols() -
+        intervals * (frame + 1) + interval;
+      EXPECT_GE(qp.inequalities().col(column).dot(qp.solution()) + offset,
+                -1e-7) << "frame " << frame << " interval " << interval;
+    }
+  }
+  EXPECT_GT(qp.inequalities().rightCols(cbf_count).norm(), 1e-8);
+  const Eigen::VectorXd offsets = qp.stateOffsets(initial_state).head(first_cbf);
+  EXPECT_GE((qp.inequalities().leftCols(first_cbf).transpose() * qp.solution()
+    + offsets).minCoeff(), -1e-7);
+  EXPECT_LE(qp.positions().cwiseAbs().maxCoeff(), std::numbers::pi + 1e-7);
+  EXPECT_LE(qp.velocities().cwiseAbs().maxCoeff(), 30.0 + 1e-7);
+
   ASSERT_NO_THROW(qp.updateState(next_acceleration));
   EXPECT_TRUE(qp.getState().allFinite());
+
+  // Far-away humans select the reduced-constraint branch. Its result must
+  // match the same configured optimizer with CBF disabled.
+  qp.setInitialState(initial_state);
+  InspectableOptimizer without_cbf;
+  without_cbf = qp;
+  without_cbf.activateCbfBounds(false);
+  without_cbf.updateMatrices();
+  without_cbf.setInitialState(initial_state);
+  const std::vector<Eigen::Vector3d> far_human(
+    1, Eigen::Vector3d(100.0, 100.0, 100.0));
+  ASSERT_NO_THROW(diagnostics = qp.computedCostrainedSolution(
+    target_velocity, target_position, 1.0, initial_state,
+    next_acceleration, scaling, human_velocity, far_human));
+  ASSERT_GT(diagnostics[0], 5.0);
+  Eigen::VectorXd reference_acceleration;
+  double reference_scaling;
+  ASSERT_NO_THROW(without_cbf.computedCostrainedSolution(
+    target_velocity, target_position, 1.0, initial_state,
+    reference_acceleration, reference_scaling));
+  EXPECT_TRUE(qp.solution().isApprox(without_cbf.solution(), 1e-8));
+  EXPECT_GE((without_cbf.inequalities().transpose() * qp.solution() +
+    without_cbf.stateOffsets(initial_state)).minCoeff(), -1e-7);
 }
 
 TEST_F(ThorQpIntegrationTest, ComputesConstrainedStepWithoutCbf)
@@ -121,7 +198,7 @@ TEST_F(ThorQpIntegrationTest, ComputesConstrainedStepWithoutCbf)
   constexpr double sampling_period = 0.01;
   const auto axes = static_cast<unsigned int>(model_.nv);
 
-  ThorQP qp;
+  InspectableOptimizer qp;
   qp.setPinocchioModel(model_);
   qp.setIntervals(intervals, axes, horizon, sampling_period, false);
   qp.setConstraints(Eigen::VectorXd::Constant(axes, std::numbers::pi),
@@ -159,6 +236,46 @@ TEST_F(ThorQpIntegrationTest, ComputesConstrainedStepWithoutCbf)
   EXPECT_EQ(qp.getFirstPredictionVel().size(), axes);
   EXPECT_TRUE(qp.getFirstPredictionPos().allFinite());
   EXPECT_TRUE(qp.getFirstPredictionVel().allFinite());
+}
+
+TEST_F(ThorQpIntegrationTest, RepeatedConstrainedSolvesPreserveSolutionAndBounds)
+{
+  const auto axes = static_cast<unsigned int>(model_.nv);
+  InspectableOptimizer qp;
+  qp.setPinocchioModel(model_);
+  qp.setIntervals(3, axes, 0.15, 0.01, false);
+  qp.setConstraints(Eigen::VectorXd::Constant(axes, 2.0),
+                    Eigen::VectorXd::Constant(axes, -1.0),
+                    Eigen::VectorXd::Constant(axes, 0.2),
+                    Eigen::VectorXd::Constant(axes, 0.5),
+                    Eigen::VectorXd::Constant(axes, 100.0));
+  qp.setWeigthFunction(1e-3, 0.0, 0.0, 10.0, 1.0);
+  qp.setCBFParameters(2.5, 0.15, 0.5, 3.0);
+  qp.setCbfIds({}, 0);
+  qp.activatePositionBounds(false);
+  qp.activateCbfBounds(false);
+  qp.updateMatrices();
+  Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
+  state.tail(axes).setConstant(0.1);
+  qp.setInitialState(state);
+  Eigen::VectorXd reference;
+  for (int iteration = 0; iteration < 4; ++iteration) {
+    SCOPED_TRACE(iteration);
+    Eigen::VectorXd acceleration;
+    double scaling;
+    ASSERT_NO_THROW(qp.computedCostrainedSolution(
+      Eigen::VectorXd::Constant(3 * axes, 2.0),
+      Eigen::VectorXd::Constant(axes, 0.5), 0.8, state, acceleration, scaling));
+    ASSERT_TRUE(qp.solution().allFinite());
+    EXPECT_GE((qp.inequalities().transpose() * qp.solution() + qp.stateOffsets(state))
+                .minCoeff(), -1e-7);
+    EXPECT_LE(acceleration.cwiseAbs().maxCoeff(), 0.5 + 1e-7);
+    EXPECT_LE(qp.velocities().cwiseAbs().maxCoeff(), 0.2 + 1e-7);
+    EXPECT_GE(scaling, 0.05 - 1e-7);
+    EXPECT_LE(scaling, 1.01 + 1e-7);
+    if (iteration == 0) reference = qp.solution();
+    else EXPECT_TRUE(qp.solution().isApprox(reference, 1e-9));
+  }
 }
 
 TEST_F(ThorQpIntegrationTest, CopiesConfiguredOptimizer)
