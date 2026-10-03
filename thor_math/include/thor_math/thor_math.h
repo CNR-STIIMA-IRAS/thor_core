@@ -38,7 +38,6 @@
 
 
 #include <Eigen/Dense>
-#include <eigen_matrix_utils/eiquadprog.hpp>
 #include <iostream>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>

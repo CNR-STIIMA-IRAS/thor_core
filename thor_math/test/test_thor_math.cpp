@@ -276,6 +276,14 @@ TEST_F(ThorQpIntegrationTest, RepeatedConstrainedSolvesPreserveSolutionAndBounds
     if (iteration == 0) reference = qp.solution();
     else EXPECT_TRUE(qp.solution().isApprox(reference, 1e-9));
   }
+  // The acceleration bound cannot bring this velocity into range in time.
+  state.tail(axes).setConstant(10.0);
+  qp.setInitialState(state);
+  Eigen::VectorXd acceleration;
+  double scaling;
+  EXPECT_THROW(qp.computedCostrainedSolution(
+    Eigen::VectorXd::Zero(3 * axes), Eigen::VectorXd::Zero(axes),
+    0.8, state, acceleration, scaling), std::runtime_error);
 }
 
 TEST_F(ThorQpIntegrationTest, CopiesConfiguredOptimizer)

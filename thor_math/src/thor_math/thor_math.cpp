@@ -1,5 +1,7 @@
 #include <thor_math/thor_math.h>
 #include <cmath>
+#include <limits>
+#include <qpmad/solver.h>
 // #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
@@ -907,8 +909,7 @@ namespace math
             // Eigen::RowVectorXd A_barrier = -Theta * Jd;   // 1×n  (note minus)
             // double             b_barrier = -Jd.dot(dq) + m_gamma * m_h;
             // std::cout << "Barrier terms computed" << std::endl;
-            // Append new row to CI / ci0  (quadprog expects CI^T x + ci0 ≥ 0) -------
-            // Note: CI is transposed in the solve_quadprog call, so we append a row
+            // Store each barrier constraint as a column: CI^T x + ci0 >= 0.
             m_CI.col(n_cols - m_num_ph * m_nc * (j+1) + m_num_ph * i + k).segment(m_nax * i, m_nax) = A_barrier.transpose();  // A_barrier is 1×nax
             ci0(n_cols - m_num_ph * m_nc * (j+1) + m_num_ph * i + k) = b_barrier;
           }
@@ -935,32 +936,38 @@ namespace math
       // std::cout << "Relative velocity: " << return_value[4] << std::endl;
       // std::cout << "Projected velocity: " << return_value[5] << std::endl;
     }
-    double sol;
-    if (m_h > 5)
+    Eigen::Index inequality_count = m_CI.cols();
+    if (m_use_cbf && m_h > 5)
     {
-      //TODO make the threshold value a parameter
-      std::cout << "Solving quadratic program with reduced constraints" << std::endl;
-      Eigen::MatrixXd CI_temp = m_CI.block(0,0,m_CI.rows(),m_CI.cols()- m_nc * m_frameIds.size() * m_num_ph);
-      Eigen::VectorXd ci0_temp = m_ci0.segment(0, m_ci0.size() - m_nc * m_frameIds.size() * m_num_ph);
-      sol = Eigen::solve_quadprog(m_H,m_f,m_CE,m_ce0,CI_temp,ci0_temp,m_sol);
+      // TODO: make the distance threshold a parameter.
+      inequality_count -= m_nc * m_frameIds.size() * m_num_ph;
     }
-    else
-    {
-      sol = Eigen::solve_quadprog(m_H,m_f,m_CE,m_ce0,m_CI,ci0,m_sol);
-    }
-    // std::cout << "M_CI size: " << m_CI.rows() << " x " << m_CI.cols() << std::endl;
-    // std::cout << "M_CI rank: " << m_CI.fullPivLu().rank() << std::endl;
-    // std::cout << "M_CI: rank (fcn):" << computeRank(m_CI) << std::endl;
-    // std::cout << "m_ci0: " << ci0.tail(50).transpose() << std::endl;
-    // double sol = Eigen::solve_quadprog(m_H,m_f,m_CE,m_ce0,m_CI,ci0,m_sol );
-    // std::cout << "Solution: " << std::to_string(sol) << std::endl;
-    // std::cout << "Sol is nan? " << std::isnan(sol) << std::endl;
-    // std::cout << "Sol is nan? " << (double)(sol==sol) << std::endl;
-    // std::cout << "NAN is nan? " << std::isnan(NAN) << std::endl;
+    const Eigen::Index equality_count = m_CE.cols();
+    Eigen::MatrixXd constraints(equality_count + inequality_count, m_H.rows());
+    Eigen::VectorXd lower(equality_count + inequality_count);
+    Eigen::VectorXd upper = Eigen::VectorXd::Constant(
+      equality_count + inequality_count, std::numeric_limits<double>::infinity());
+    constraints.topRows(equality_count) = m_CE.transpose();
+    lower.head(equality_count) = -m_ce0;
+    upper.head(equality_count) = -m_ce0;
+    constraints.bottomRows(inequality_count) = m_CI.leftCols(inequality_count).transpose();
+    lower.tail(inequality_count) = -ci0.head(inequality_count);
 
-    if (!std::isfinite(sol))
+    // qpmad factorizes H in place; retain the original cost matrix in ThorQP.
+    Eigen::MatrixXd hessian = m_H;
+    qpmad::Solver solver;
+    qpmad::Solver::ReturnStatus status;
+    try
     {
-     throw std::runtime_error("Problem is not feasible. Check the constraints and the target values.");
+      status = solver.solve(m_sol, hessian, m_f, constraints, lower, upper);
+    }
+    catch (const std::runtime_error& error)
+    {
+      throw std::runtime_error(std::string("Quadratic program failed: ") + error.what());
+    }
+    if (status != qpmad::Solver::OK || !m_sol.allFinite())
+    {
+      throw std::runtime_error("Problem is not feasible. Check the constraints and the target values.");
     }
 
     // std::cout << "m_ci0 size: " << m_ci0.size() << " x 1" << std::endl;

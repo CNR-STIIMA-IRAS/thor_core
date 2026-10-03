@@ -139,11 +139,6 @@ install(DIRECTORY include/thor_math
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
 )
 
-install(DIRECTORY include/eigen_matrix_utils
-  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
-)
-
 install(DIRECTORY include/qpmad
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"

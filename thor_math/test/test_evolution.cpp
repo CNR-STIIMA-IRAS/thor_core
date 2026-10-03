@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <thor_math/thor_math.h>
+#include <qpmad/solver.h>
 
 #include <cmath>
 #include <limits>
@@ -276,67 +277,57 @@ TEST(ThorQp, ComputesBarrierValuesAndDerivativesForAllModes)
 TEST(QuadraticProgram, SolvesEqualityAndInequalityConstraints)
 {
   Eigen::MatrixXd hessian = Eigen::MatrixXd::Identity(2, 2);
+  const Eigen::MatrixXd original_hessian = hessian;
   Eigen::VectorXd gradient(2);
   gradient << -2.0, -5.0;
-
-  Eigen::MatrixXd equality(2, 1);
-  equality << 1.0, -1.0;
-  Eigen::VectorXd equality_offset = Eigen::VectorXd::Zero(1);
-
-  Eigen::MatrixXd inequality(2, 1);
-  inequality << -1.0, -1.0;
-  Eigen::VectorXd inequality_offset(1);
-  inequality_offset << 2.0;
-
+  Eigen::MatrixXd constraints(2, 2);
+  constraints << 1.0, -1.0,
+                 1.0,  1.0;
+  Eigen::VectorXd lower(2), upper(2);
+  lower << 0.0, -std::numeric_limits<double>::infinity();
+  upper << 0.0, 2.0;
   Eigen::VectorXd solution;
-  const double objective = Eigen::solve_quadprog(
-    hessian, gradient, equality, equality_offset,
-    inequality, inequality_offset, solution);
-
-  ASSERT_TRUE(std::isfinite(objective));
+  qpmad::Solver solver;
+  ASSERT_EQ(solver.solve(solution, hessian, gradient, constraints, lower, upper),
+            qpmad::Solver::OK);
   ASSERT_EQ(solution.size(), 2);
-  EXPECT_NEAR(objective, -6.0, 1e-9);
   EXPECT_NEAR(solution(0), 1.0, 1e-9);
   EXPECT_NEAR(solution(1), 1.0, 1e-9);
-  EXPECT_NEAR((equality.transpose() * solution)(0), 0.0, 1e-9);
-  EXPECT_GE((inequality.transpose() * solution + inequality_offset)(0),
-            -1e-9);
+  EXPECT_NEAR(0.5 * solution.dot(original_hessian * solution) +
+              gradient.dot(solution), -6.0, 1e-9);
+  EXPECT_NEAR((constraints * solution)(0), 0.0, 1e-9);
+  EXPECT_LE((constraints * solution)(1), 2.0 + 1e-9);
 }
 
 // Analytic optimum: x - 2y = 1 and x <= 3 force (3, 1).
-// Unequal numbers of variables/constraints expose missing transposes.
 TEST(QuadraticProgram, PreservesNonzeroOffsetsAndAsymmetricBounds)
 {
-  Eigen::MatrixXd hessian(2, 2);
-  hessian << 4.0, 1.0, 1.0, 2.0;
-  const Eigen::MatrixXd original_hessian = hessian;
+  Eigen::MatrixXd original_hessian(2, 2);
+  original_hessian << 4.0, 1.0, 1.0, 2.0;
   Eigen::VectorXd gradient(2);
   gradient << -20.0, -8.0;
-  Eigen::MatrixXd equality(2, 1);
-  equality << 1.0, -2.0;
-  Eigen::VectorXd equality_offset = Eigen::VectorXd::Constant(1, -1.0);
-  Eigen::MatrixXd inequality(2, 3);
-  inequality << 1.0, -1.0, 0.0,
-                0.0,  0.0, 1.0;
-  Eigen::VectorXd inequality_offset(3);
-  inequality_offset << -0.5, 3.0, 0.25;
+  Eigen::MatrixXd constraints(3, 2);
+  constraints << 1.0, -2.0,
+                 1.0,  0.0,
+                 0.0,  1.0;
+  Eigen::VectorXd lower(3), upper(3);
+  lower << 1.0, 0.5, -0.25;
+  upper << 1.0, 3.0, std::numeric_limits<double>::infinity();
+  qpmad::Solver solver;
   for (int iteration = 0; iteration < 3; ++iteration) {
     SCOPED_TRACE(iteration);
-    // qpmad factorizes its input: callers must supply the original Hessian.
-    hessian = original_hessian;
+    Eigen::MatrixXd hessian = original_hessian;
     Eigen::VectorXd solution;
-    const double objective = Eigen::solve_quadprog(
-      hessian, gradient, equality, equality_offset,
-      inequality, inequality_offset, solution);
-    ASSERT_TRUE(std::isfinite(objective));
+    ASSERT_EQ(solver.solve(solution, hessian, gradient, constraints, lower, upper),
+              qpmad::Solver::OK);
     ASSERT_EQ(solution.size(), 2);
     EXPECT_NEAR(solution(0), 3.0, 1e-9);
     EXPECT_NEAR(solution(1), 1.0, 1e-9);
-    EXPECT_NEAR(objective, -46.0, 1e-9);
-    EXPECT_NEAR((equality.transpose() * solution + equality_offset)(0),
-                0.0, 1e-9);
-    EXPECT_GE((inequality.transpose() * solution + inequality_offset).minCoeff(),
-              -1e-9);
+    EXPECT_NEAR(0.5 * solution.dot(original_hessian * solution) +
+                gradient.dot(solution), -46.0, 1e-9);
+    const Eigen::VectorXd values = constraints * solution;
+    EXPECT_GE((values - lower).minCoeff(), -1e-9);
+    EXPECT_GE((upper - values).minCoeff(), -1e-9);
   }
 }
 
@@ -344,20 +335,17 @@ TEST(QuadraticProgram, ReportsInfeasibleConstraints)
 {
   Eigen::MatrixXd hessian = Eigen::MatrixXd::Identity(1, 1);
   Eigen::VectorXd gradient = Eigen::VectorXd::Zero(1);
-  Eigen::MatrixXd equality(1, 0);
-  Eigen::VectorXd equality_offset(0);
-
-  Eigen::MatrixXd inequality(1, 2);
-  inequality << 1.0, -1.0;
-  Eigen::VectorXd inequality_offset(2);
-  inequality_offset << -1.0, 0.0;
-
+  Eigen::MatrixXd constraints(2, 1);
+  constraints << 1.0, -1.0;
+  Eigen::VectorXd lower(2);
+  lower << 1.0, 0.0;
+  const Eigen::VectorXd upper = Eigen::VectorXd::Constant(
+    2, std::numeric_limits<double>::infinity());
   Eigen::VectorXd solution;
-  const double objective = Eigen::solve_quadprog(
-    hessian, gradient, equality, equality_offset,
-    inequality, inequality_offset, solution);
-
-  EXPECT_TRUE(std::isinf(objective));
+  qpmad::Solver solver;
+  // qpmad reports inconsistent constraints through a runtime_error.
+  EXPECT_THROW(solver.solve(solution, hessian, gradient, constraints, lower, upper),
+               std::runtime_error);
 }
 
 }  // namespace
