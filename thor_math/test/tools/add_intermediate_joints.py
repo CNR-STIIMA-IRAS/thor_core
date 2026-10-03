@@ -68,7 +68,9 @@ def add_intermediate_frames(root: ET.Element, frames_per_joint: int) -> None:
 def transform_urdf(input_path: Path, output_path: Path, frames: int) -> None:
     tree = ET.parse(input_path)
     add_intermediate_frames(tree.getroot(), frames)
-    ET.indent(tree, space="  ")
+    # ElementTree.indent was introduced in Python 3.9; Ubuntu 20.04 uses 3.8.
+    if hasattr(ET, "indent"):
+        ET.indent(tree, space="  ")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
 

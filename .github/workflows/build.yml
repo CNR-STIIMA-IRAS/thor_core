@@ -40,6 +40,9 @@ jobs:
           mkdir -p "$DEPS_WS"
           vcs import "$DEPS_WS" < .repos
           git -C "$DEPS_WS/pinocchio" submodule update --init --recursive
+          # Boost.System is header-only in every supported Ubuntu release.
+          # Boost >= 1.89 no longer ships its compiled compatibility library.
+          git -C "$DEPS_WS/pinocchio" apply "$GITHUB_WORKSPACE/.github/patches/pinocchio-boost-system.patch"
 
       - name: Build and install pinocchio
         run: |
@@ -97,6 +100,8 @@ jobs:
           sudo chown "$USER:$USER" "$DEPS_WS"
           vcs import "$DEPS_WS" < .repos
           git -C "$DEPS_WS/pinocchio" submodule update --init --recursive
+          # Keep the dependency configuration identical to the build matrix.
+          git -C "$DEPS_WS/pinocchio" apply "$GITHUB_WORKSPACE/.github/patches/pinocchio-boost-system.patch"
 
       - name: Build and install pinocchio
         run: |

@@ -1,0 +1,12 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -250,7 +250,7 @@
+ endif()
+ 
+-set(BOOST_REQUIRED_COMPONENTS filesystem serialization system)
++set(BOOST_REQUIRED_COMPONENTS filesystem serialization)
+ 
+ set_boost_default_options()
+ export_boost_default_options()
+ add_project_dependency(Boost REQUIRED COMPONENTS ${BOOST_REQUIRED_COMPONENTS})
