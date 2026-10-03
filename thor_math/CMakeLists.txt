@@ -79,7 +79,7 @@ endif()
 if(BUILD_UNIT_TESTS OR BUILD_INTEGRATION_TESTS)
   include(CTest)
   enable_testing()
-  find_package(GTest REQUIRED CONFIG)
+  find_package(GTest REQUIRED)
   include(GoogleTest)
 endif()
 
