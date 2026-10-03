@@ -27,7 +27,10 @@ jobs:
       - name: Install recent CMake and vcstool
         run: |
           python3 -m venv /tmp/tool-venv
-          /tmp/tool-venv/bin/pip install --no-cache-dir --upgrade cmake vcstool
+          # vcstool imports pkg_resources, removed in setuptools 82.
+          /tmp/tool-venv/bin/pip install --no-cache-dir --upgrade "setuptools<82" cmake vcstool
+          /tmp/tool-venv/bin/pip check
+          /tmp/tool-venv/bin/vcs --help > /dev/null
           echo "/tmp/tool-venv/bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@v4
@@ -80,7 +83,10 @@ jobs:
       - name: Install recent CMake and vcstool
         run: |
           python3 -m venv /tmp/tool-venv
-          /tmp/tool-venv/bin/pip install --no-cache-dir --upgrade cmake vcstool
+          # vcstool imports pkg_resources, removed in setuptools 82.
+          /tmp/tool-venv/bin/pip install --no-cache-dir --upgrade "setuptools<82" cmake vcstool
+          /tmp/tool-venv/bin/pip check
+          /tmp/tool-venv/bin/vcs --help > /dev/null
           echo "/tmp/tool-venv/bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@v4

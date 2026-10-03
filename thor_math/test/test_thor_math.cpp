@@ -7,12 +7,14 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
-#include <numbers>
 #include <string>
 #include <vector>
 
 namespace thor::math {
 namespace {
+
+// GCC 9 on Ubuntu 20.04 does not provide the C++20 <numbers> header.
+constexpr double kPi = 3.141592653589793238462643383279502884;
 
 class InspectableOptimizer : public ThorQP
 {
@@ -83,8 +85,8 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   qp.setPinocchioModel(model_);
   qp.setIntervals(intervals, axes, horizon, sampling_period);
   qp.setCBFParameters(2.5, 0.15, 0.5, 3.0);
-  qp.setConstraints(Eigen::VectorXd::Constant(axes, std::numbers::pi),
-                    Eigen::VectorXd::Constant(axes, -std::numbers::pi),
+  qp.setConstraints(Eigen::VectorXd::Constant(axes, kPi),
+                    Eigen::VectorXd::Constant(axes, -kPi),
                     Eigen::VectorXd::Constant(axes, 30.0),
                     Eigen::VectorXd::Constant(axes, 500.0),
                     Eigen::VectorXd::Constant(axes, 10.0));
@@ -109,8 +111,8 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   }
 
   Eigen::VectorXd initial_position(axes);
-  initial_position << 0.0, -std::numbers::pi / 2.0,
-    std::numbers::pi / 2.0, 0.0, 0.0, 0.0;
+  initial_position << 0.0, -kPi / 2.0,
+    kPi / 2.0, 0.0, 0.0, 0.0;
   Eigen::VectorXd initial_state = Eigen::VectorXd::Zero(2 * axes);
   initial_state.head(axes) = initial_position;
   qp.setInitialState(initial_state);
@@ -161,7 +163,7 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   const Eigen::VectorXd offsets = qp.stateOffsets(initial_state).head(first_cbf);
   EXPECT_GE((qp.inequalities().leftCols(first_cbf).transpose() * qp.solution()
     + offsets).minCoeff(), -1e-7);
-  EXPECT_LE(qp.positions().cwiseAbs().maxCoeff(), std::numbers::pi + 1e-7);
+  EXPECT_LE(qp.positions().cwiseAbs().maxCoeff(), kPi + 1e-7);
   EXPECT_LE(qp.velocities().cwiseAbs().maxCoeff(), 30.0 + 1e-7);
 
   ASSERT_NO_THROW(qp.updateState(next_acceleration));
@@ -203,8 +205,8 @@ TEST_F(ThorQpIntegrationTest, ComputesConstrainedStepWithoutCbf)
   InspectableOptimizer qp;
   qp.setPinocchioModel(model_);
   qp.setIntervals(intervals, axes, horizon, sampling_period, false);
-  qp.setConstraints(Eigen::VectorXd::Constant(axes, std::numbers::pi),
-                    Eigen::VectorXd::Constant(axes, -std::numbers::pi),
+  qp.setConstraints(Eigen::VectorXd::Constant(axes, kPi),
+                    Eigen::VectorXd::Constant(axes, -kPi),
                     Eigen::VectorXd::Constant(axes, 2.0),
                     Eigen::VectorXd::Constant(axes, 20.0),
                     Eigen::VectorXd::Constant(axes, 100.0));
