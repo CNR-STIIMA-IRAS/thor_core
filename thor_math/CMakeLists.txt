@@ -25,6 +25,28 @@ include(CMakePackageConfigHelpers)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Cap parallel compile and link jobs by physical memory: translation units
+# that include Pinocchio peak at a few GB each. Job pools are honored by the
+# Ninja generators only; with Makefiles the caller's -j decides.
+set(THOR_MATH_JOB_MEMORY_MB 3072 CACHE STRING
+  "Estimated peak memory of one compile job, used to size the job pool")
+set(THOR_MATH_RESERVED_MEMORY_MB 4096 CACHE STRING
+  "Memory left to the rest of the system when sizing the job pool")
+if(NOT CMAKE_JOB_POOL_COMPILE)
+  cmake_host_system_information(RESULT _total_memory_mb QUERY TOTAL_PHYSICAL_MEMORY)
+  math(EXPR _max_jobs
+    "(${_total_memory_mb} - ${THOR_MATH_RESERVED_MEMORY_MB}) / ${THOR_MATH_JOB_MEMORY_MB}")
+  if(_max_jobs LESS 1)
+    set(_max_jobs 1)
+  endif()
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS thor_math_jobs=${_max_jobs})
+  set(CMAKE_JOB_POOL_COMPILE thor_math_jobs)
+  set(CMAKE_JOB_POOL_LINK thor_math_jobs)
+  if(CMAKE_GENERATOR MATCHES "Ninja")
+    message(STATUS "thor_math: at most ${_max_jobs} parallel jobs (${_total_memory_mb} MB RAM)")
+  endif()
+endif()
+
 option(BUILD_UNIT_TESTS "Build the unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build the integration test executable" OFF)
 option(BUILD_EXAMPLES "Build the examples" OFF)

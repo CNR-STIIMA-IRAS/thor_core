@@ -111,6 +111,10 @@ is covered by spheres as well.
     problem with the bounds as general rows, over 20 cycles with saturated
     accelerations, for both formulations;
   - the radii, the per-obstacle `delta_H` and the input validation.
+- Build: with the Ninja generators the parallel compile and link jobs are
+  capped by the physical memory, assuming `THOR_MATH_JOB_MEMORY_MB` (3072)
+  per job and leaving `THOR_MATH_RESERVED_MEMORY_MB` (4096) to the system.
+  With Makefiles the `-j` of the caller decides.
 
 ### Changed
 
