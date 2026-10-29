@@ -20,6 +20,11 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
 find_package(ament_cmake REQUIRED)
 find_package(generate_parameter_library REQUIRED)
 find_package(Eigen3 REQUIRED)
+# Pinocchio looks for Boost: use the BoostConfig.cmake of Boost, not the
+# FindBoost module removed in CMake 3.30 (the policy is new in that version).
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
 find_package(pinocchio REQUIRED)
 find_package(thor_math REQUIRED)
 foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})

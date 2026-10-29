@@ -59,6 +59,11 @@ set(THOR_MATH_ARCH_FLAGS "" CACHE STRING
   "Architecture flags shared with every user of thor_math (e.g. -march=x86-64-v3); Pinocchio must be built with the same")
 
 find_package(Eigen3 REQUIRED COMPONENTS Core Dense Geometry)
+# Pinocchio looks for Boost: use the BoostConfig.cmake of Boost, not the
+# FindBoost module removed in CMake 3.30 (the policy is new in that version).
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
 find_package(pinocchio REQUIRED CONFIG)
 
 add_library(thor_math SHARED

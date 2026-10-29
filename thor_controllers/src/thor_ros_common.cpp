@@ -115,7 +115,7 @@ void ThorRosCore::configure(
       }
       auto data = std::make_shared<ObstacleData>();
       fromMsg(*msg, data->obstacles);
-      obstacle_buffer_.writeFromNonRT(data);
+      obstacle_box_.set([&](std::shared_ptr<ObstacleData> & box) { box = data; });
     });
 
   state_pub_ = node->create_publisher<thor_msgs::msg::ThorControllerState>(
@@ -125,7 +125,7 @@ void ThorRosCore::configure(
 
 void ThorRosCore::clearObstacles()
 {
-  obstacle_buffer_.writeFromNonRT(nullptr);
+  obstacle_box_.set([](std::shared_ptr<ObstacleData> & box) { box = nullptr; });
   last_obstacles_.reset();
   still_obstacles_.clear();
   still_obstacles_.reserve(64);
@@ -135,7 +135,9 @@ void ThorRosCore::clearObstacles()
 
 void ThorRosCore::updateObstacles(const rclcpp::Time & now)
 {
-  const auto latest = *obstacle_buffer_.readFromRT();
+  // Without waiting: while the subscription writes, the last obstacles stay.
+  std::shared_ptr<ObstacleData> latest = last_obstacles_;
+  obstacle_box_.try_get([&](const std::shared_ptr<ObstacleData> & box) { latest = box; });
   if (!latest) return;
   if (latest != last_obstacles_)
   {

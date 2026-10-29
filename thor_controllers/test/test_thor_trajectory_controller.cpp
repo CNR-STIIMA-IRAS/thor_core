@@ -243,8 +243,12 @@ TEST_F(ThorTrajectoryControllerTest, RejectsUnsupportedConfigurations)
   ASSERT_EQ(init({rclcpp::Parameter("thor.robot_spheres.tool.frame", "nowhere")}),
             controller_interface::return_type::OK);
   EXPECT_FALSE(configure_succeeds(controller_));
-  // The open-loop mode of JTC: the MPC has its own.
-  ASSERT_EQ(init({rclcpp::Parameter("open_loop_control", true)}), controller_interface::return_type::OK);
+  // The open-loop mode of JTC: the MPC has its own. Renamed after Jazzy.
+  constexpr const char * from_desired_state =
+    requires(joint_trajectory_controller::Params p) { p.interpolate_from_desired_state; }
+      ? "interpolate_from_desired_state"
+      : "open_loop_control";
+  ASSERT_EQ(init({rclcpp::Parameter(from_desired_state, true)}), controller_interface::return_type::OK);
   EXPECT_FALSE(configure_succeeds(controller_));
   // Effort commands.
   ASSERT_EQ(init({rclcpp::Parameter("command_interfaces", std::vector<std::string>{"effort"})}),

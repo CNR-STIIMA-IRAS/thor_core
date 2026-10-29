@@ -14,8 +14,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
-#include <realtime_tools/realtime_buffer.hpp>
 #include <realtime_tools/realtime_publisher.hpp>
+#include <realtime_tools/realtime_thread_safe_box.hpp>
 
 #include "thor_controllers/thor_core.hpp"
 #include "thor_controllers/thor_parameters.hpp"
@@ -74,7 +74,7 @@ private:
   rclcpp::Logger logger_ = rclcpp::get_logger("thor_controllers");
   rclcpp::Clock::SharedPtr clock_;
 
-  realtime_tools::RealtimeBuffer<std::shared_ptr<ObstacleData>> obstacle_buffer_;
+  realtime_tools::RealtimeThreadSafeBox<std::shared_ptr<ObstacleData>> obstacle_box_;
   std::shared_ptr<ObstacleData> last_obstacles_;
   rclcpp::Time last_received_;
   std::vector<Obstacle> still_obstacles_;

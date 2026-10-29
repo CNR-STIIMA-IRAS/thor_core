@@ -45,8 +45,18 @@ CallbackReturn ThorTrajectoryController::on_configure(const rclcpp_lifecycle::St
   };
   if (!params_.speed_scaling.state_interface.empty() || !params_.speed_scaling.command_interface.empty())
     return fail("speed_scaling interfaces are not supported: the time scaling is set by the MPC (see thor.target_scaling)");
-  if (params_.open_loop_control)
-    return fail("open_loop_control must be false: the initial state of the MPC is set by thor.state_feedback");
+  // JTC starting from the last command instead of the measured state:
+  // open_loop_control up to Jazzy, interpolate_from_desired_state from Kilted.
+  const bool from_desired_state = [](const auto & p) {
+    bool on = false;
+    if constexpr (requires { p.open_loop_control; }) on = on || p.open_loop_control;
+    if constexpr (requires { p.interpolate_from_desired_state; }) on = on || p.interpolate_from_desired_state;
+    return on;
+  }(params_);
+  if (from_desired_state)
+    return fail(
+      "interpolate_from_desired_state (open_loop_control up to Jazzy) must be false: "
+      "the initial state of the MPC is set by thor.state_feedback");
   // With velocity commands alone the base class also runs its PID adapter;
   // its output is overwritten, the MPC corrects the position itself.
   if (has_effort_command_interface_)

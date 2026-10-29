@@ -43,8 +43,9 @@ Parameters of JTC that matter:
   `[position, acceleration]` or `[position, velocity, acceleration]`. Effort
   is not supported. With `[velocity]` JTC also runs its PID adapter, whose
   output is overwritten.
-- `open_loop_control` must be false and `speed_scaling.*` empty: the
-  initial state and the scaling are set by the MPC.
+- `interpolate_from_desired_state` (`open_loop_control` up to Jazzy) must be
+  false and `speed_scaling.*` empty: the initial state and the scaling are
+  set by the MPC.
 - Path tolerances (`constraints.<joint>.trajectory`) are checked against the
   nominal trajectory, while the MPC moves away from it near obstacles: keep
   them at 0 (off), and `constraints.goal_time` at 0 since the trajectory slows down.

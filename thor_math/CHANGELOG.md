@@ -242,6 +242,9 @@ with position, velocity and acceleration. The robot is covered by spheres.
   With `delta_H = 0` all the forms coincide.
 - The CBF columns are written into buffers that are zeroed first, because
   Pinocchio only writes the Jacobian columns of the frame's supporting joints.
+- Build: no CMP0167 warnings with CMake 3.30 or later. Boost, which Pinocchio
+  looks for, is found through the `BoostConfig.cmake` of Boost instead of the
+  removed `FindBoost` module.
 
 ## [0.1.0]
 
