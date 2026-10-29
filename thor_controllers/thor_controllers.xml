@@ -1,0 +1,10 @@
+<library path="thor_controllers">
+  <class name="thor_controllers/ThorTrajectoryController"
+         type="thor_controllers::ThorTrajectoryController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      joint_trajectory_controller with the THOR MPC between the trajectory and the robot:
+      time scaling and control barrier function against moving obstacles.
+    </description>
+  </class>
+</library>

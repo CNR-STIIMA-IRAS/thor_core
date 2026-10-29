@@ -1,0 +1,233 @@
+# Parameters shared by the THOR controllers, under the "thor." prefix so that
+# they do not clash with the parameters of joint_trajectory_controller.
+thor_controllers:
+  thor:
+    state_feedback:
+      type: string
+      default_value: "open_loop"
+      description: "Initial state of the MPC at each cycle. open_loop: the state integrated by the controller (position-commanded robots). position: measured position, integrated velocity (velocity-commanded robots). full: measured position and velocity."
+      read_only: true
+      validation:
+        one_of<>: [["open_loop", "position", "full"]]
+    target_scaling:
+      type: double
+      default_value: 1.0
+      description: "Desired time scaling of the trajectory (1 = nominal speed)."
+      validation:
+        gt_eq<>: [0.0]
+
+    horizon:
+      n_intervals:
+        type: int
+        default_value: 5
+        description: "Control intervals of the prediction horizon."
+        read_only: true
+        validation:
+          gt<>: [0]
+      time:
+        type: double
+        default_value: 0.2
+        description: "Prediction horizon [s]."
+        read_only: true
+        validation:
+          gt<>: [0.0]
+      input_blocking:
+        type: bool
+        default_value: true
+        description: "Quadratically growing intervals (true) or equal intervals (false)."
+        read_only: true
+
+    weights:
+      acceleration:
+        type: double
+        default_value: 0.000001
+        description: "Weight of the joint accelerations."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      jerk:
+        type: double
+        default_value: 0.0
+        description: "Weight of the finite-difference jerk."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      scaling:
+        type: double
+        default_value: 50.0
+        description: "Weight of the difference between the time scaling and target_scaling."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      clik:
+        type: double
+        default_value: 10000.0
+        description: "Weight of the position error with respect to the trajectory."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+
+    limits:
+      velocity:
+        type: double_array
+        default_value: []
+        description: "Velocity limits of the joints [rad/s or m/s]; empty means the limits of the URDF."
+        read_only: true
+        validation:
+          lower_element_bounds<>: [0.0]
+      acceleration:
+        type: double_array
+        default_value: []
+        description: "Acceleration limits of the joints [rad/s^2 or m/s^2], one per joint (required)."
+        read_only: true
+        validation:
+          lower_element_bounds<>: [0.0]
+      position_bounds:
+        type: bool
+        default_value: true
+        description: "Keep the joints within the position limits of the URDF."
+        read_only: true
+      min_scaling:
+        type: double
+        default_value: 0.0
+        description: "Lower bound of the time scaling."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      max_scaling:
+        type: double
+        default_value: 1.0
+        description: "Upper bound of the time scaling."
+        read_only: true
+        validation:
+          gt<>: [0.0]
+
+    cbf:
+      enabled:
+        type: bool
+        default_value: true
+        description: "Keep a safe distance from the obstacles with the control barrier function."
+        read_only: true
+      formulation:
+        type: string
+        default_value: "discrete"
+        description: "discrete: barrier along the whole horizon. continuous: barrier on the first interval only."
+        read_only: true
+        validation:
+          one_of<>: [["discrete", "continuous"]]
+      linearizations:
+        type: int
+        default_value: 1
+        description: "Maximum QPs per cycle, each re-linearizing the barrier around the previous plan."
+        read_only: true
+        validation:
+          gt<>: [0]
+      linearization_damping:
+        type: double
+        default_value: 1.0
+        description: "Step of the linearization point towards each new solution, in (0, 1]."
+        read_only: true
+        validation:
+          bounds<>: [0.0, 1.0]
+      linearization_tolerance:
+        type: double
+        default_value: 0.0
+        description: "Stop re-linearizing when the solution changes by at most this value; 0 never stops early."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      braking_deceleration:
+        type: double
+        default_value: 2.5
+        description: "Braking deceleration of the robot in the minimum distance [m/s^2] (a_s)."
+        read_only: true
+        validation:
+          gt<>: [0.0]
+      reaction_time:
+        type: double
+        default_value: 0.15
+        description: "Reaction time before braking [s] (T_r)."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      safety_margin:
+        type: double
+        default_value: 0.05
+        description: "Safety margin between the robot and obstacle surfaces [m] (C)."
+        read_only: true
+        validation:
+          gt<>: [0.0]
+      gamma:
+        type: double
+        default_value: 5.0
+        description: "Class-K gain of the barrier [1/s]."
+        read_only: true
+        validation:
+          gt<>: [0.0]
+      distance_error:
+        type: double
+        default_value: 0.0
+        description: "Default distance estimation error [m] (delta_H), for obstacles that do not give their own."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      activation_distance:
+        type: double
+        default_value: 5.0
+        description: "The barrier constraints are dropped when the lowest barrier is above this value [m]."
+        read_only: true
+      max_obstacles:
+        type: int
+        default_value: 4
+        description: "Obstacles considered in each cycle; the closest to the robot are kept."
+        read_only: true
+        validation:
+          gt<>: [0]
+
+    robot_spheres:
+      names:
+        type: string_array
+        default_value: []
+        description: "Spheres covering the robot, monitored by the barrier."
+        read_only: true
+        validation:
+          unique<>: null
+      __map_names:
+        frame:
+          type: string
+          default_value: ""
+          description: "Frame of the robot model the sphere is attached to."
+          read_only: true
+        offset:
+          type: double_array
+          default_value: [0.0, 0.0, 0.0]
+          description: "Sphere center in the frame [m]."
+          read_only: true
+          validation:
+            fixed_size<>: [3]
+        radius:
+          type: double
+          default_value: 0.0
+          description: "Sphere radius [m]."
+          read_only: true
+          validation:
+            gt_eq<>: [0.0]
+
+    obstacles:
+      topic:
+        type: string
+        default_value: "~/obstacles"
+        description: "Topic of the obstacles (thor_msgs/msg/ObstacleArray)."
+        read_only: true
+      frame_id:
+        type: string
+        default_value: ""
+        description: "Frame of the obstacles; empty means the root frame of the robot model. Messages in other frames are discarded."
+        read_only: true
+      timeout:
+        type: double
+        default_value: 0.5
+        description: "After this time without messages [s], the last obstacles are kept but considered still; 0 never expires."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]

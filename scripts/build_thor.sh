@@ -265,6 +265,9 @@ else
     echo "toolchain:          ${toolchain:-(native)}"
     echo "compiler:           $(grep -m1 '^CMAKE_CXX_COMPILER:' "$build_dir/thor_math/CMakeCache.txt" | cut -d= -f2)"
   } > "$info"
+  # Keep colcon from taking the sources and the installed packages for
+  # packages of a ROS workspace that contains this repository.
+  touch "$deps_dir/COLCON_IGNORE" "$prefix/COLCON_IGNORE"
 fi
 
 cat <<EOF

@@ -19,3 +19,5 @@ install/
 .codex/
 
 *.pyc
+# colcon
+log/
