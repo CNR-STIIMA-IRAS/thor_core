@@ -14,10 +14,10 @@ Core libraries for THOR.
 
 ## Dependencies
 
-Source dependencies are listed in [dep.repos](dep.repos) and can be fetched with [vcstool](https://github.com/dirk-thomas/vcstool):
+Source dependencies are listed in [.repos](.repos) and can be fetched with [vcstool](https://github.com/dirk-thomas/vcstool):
 
 ```bash
-mkdir -p deps && vcs import deps < dep.repos
+mkdir -p deps && vcs import deps < .repos
 ```
 
 System packages: `libeigen3-dev`, `libboost-all-dev`, `liburdfdom-dev`.
@@ -28,7 +28,7 @@ With rosdep, system dependencies declared in [thor_math/package.xml](thor_math/p
 rosdep install --from-paths [src_of_your_ws] --ignore-src -r -y 
 ```
 
-Depending on your ROS distribution, `pinocchio` may not be available as a rosdep key; it can be built from [dep.repos](dep.repos).
+Depending on your ROS distribution, `pinocchio` may not be available as a rosdep key; it can be built from [.repos](.repos), or with the script below.
 
 ## Build
 
@@ -36,6 +36,23 @@ Depending on your ROS distribution, `pinocchio` may not be available as a rosdep
 cmake -S thor_math -B build/thor_math
 cmake --build build/thor_math -j
 ```
+
+### Pinocchio and thor_math from source, optionally optimized
+
+[scripts/build_thor.sh](scripts/build_thor.sh) builds the Pinocchio pinned in [.repos](.repos) and `thor_math` with the same flags, and installs both into one prefix (by default `install/<arch>`). Nothing else on the machine changes: the system or ROS Pinocchio stays as it is, and only the programs pointed at the prefix use this build. It needs Eigen, Boost and, unless `--no-urdf`, urdfdom.
+
+```bash
+scripts/build_thor.sh --tests                                   # portable
+scripts/build_thor.sh --arch -march=x86-64-v3 --tests           # AVX2/FMA
+scripts/build_thor.sh --dep-prefix /opt/ros/jazzy --tests       # urdfdom from ROS
+scripts/build_thor.sh --toolchain <file>.cmake --arch "<flags>" # cross compilation
+cmake -S <your app> -B <build> -DCMAKE_PREFIX_PATH=install/x86-64-v3
+```
+
+- **Architecture flags must match.** Flags such as `-march=x86-64-v3` change the layout of Eigen objects, so Pinocchio, `thor_math` and the application must share them, or the program crashes. The script builds both libraries with the same flags, and `thor_math` exports them with its CMake target (`THOR_MATH_ARCH_FLAGS`), so applications that link `thor_math::thor_math` get them too.
+- **Parallel jobs** are sized by the physical memory (3 GB per job, 4 GB left to the system), because a translation unit that includes Pinocchio peaks at a few GB.
+- **Pinocchio without precompiled template instances** (`--template-instantiation off`, the default) builds in seconds instead of minutes, and is as fast at run time.
+- The configuration is recorded in `<prefix>/share/thor_math/build-info.txt`. `scripts/build_thor.sh --help` lists all the options; measured gains of the build options are in [thor_math/docs/api.md](thor_math/docs/api.md) (section 3.1).
 
 ## Example
 

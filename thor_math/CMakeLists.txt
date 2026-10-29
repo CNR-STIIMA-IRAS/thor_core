@@ -52,6 +52,11 @@ option(BUILD_INTEGRATION_TESTS "Build the integration test executable" OFF)
 option(BUILD_EXAMPLES "Build the examples" OFF)
 option(BUILD_DOCS "Add the thor_math_docs target (Doxygen HTML reference)" OFF)
 option(ENABLE_COVERAGE "Enable source-based test coverage instrumentation" OFF)
+# Flags that change the layout of Eigen objects (e.g. -march=x86-64-v3) must
+# be the same in Pinocchio, thor_math and every program that uses them, or
+# they crash. They are exported with the target, so that its users get them.
+set(THOR_MATH_ARCH_FLAGS "" CACHE STRING
+  "Architecture flags shared with every user of thor_math (e.g. -march=x86-64-v3); Pinocchio must be built with the same")
 
 find_package(Eigen3 REQUIRED COMPONENTS Core Dense Geometry)
 find_package(pinocchio REQUIRED CONFIG)
@@ -81,6 +86,12 @@ target_link_libraries(thor_math
     Eigen3::Eigen
     pinocchio::pinocchio
 )
+
+if(THOR_MATH_ARCH_FLAGS)
+  separate_arguments(_arch_flags UNIX_COMMAND "${THOR_MATH_ARCH_FLAGS}")
+  target_compile_options(thor_math PUBLIC ${_arch_flags})
+  message(STATUS "thor_math: architecture flags exported to users: ${THOR_MATH_ARCH_FLAGS}")
+endif()
 
 if(ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

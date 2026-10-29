@@ -119,6 +119,11 @@ is covered by spheres as well.
   capped by the physical memory, assuming `THOR_MATH_JOB_MEMORY_MB` (3072)
   per job and leaving `THOR_MATH_RESERVED_MEMORY_MB` (4096) to the system.
   With Makefiles the `-j` of the caller decides.
+- Build: `THOR_MATH_ARCH_FLAGS` (e.g. `-march=x86-64-v3`) is added to the
+  public compile options of the target, so that the programs that link
+  `thor_math::thor_math` share the flags that change the layout of Eigen
+  objects. `scripts/build_thor.sh` (in the repository root) builds the
+  Pinocchio of `.repos` and `thor_math` with the same flags into one prefix.
 
 ### Changed
 

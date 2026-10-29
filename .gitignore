@@ -5,6 +5,9 @@
 *.swp
 kdev4/
 build/
+# scripts/build_thor.sh
+deps/
+install/
 
 # File generato da QtCreator
 *.txt.user
