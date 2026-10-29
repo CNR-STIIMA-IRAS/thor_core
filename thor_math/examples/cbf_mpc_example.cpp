@@ -1,20 +1,30 @@
-// Closed-loop example of thor::math::ThorQP: a UR10 sweeps its base joint
-// while a person walks towards it, stops, and stands next to the robot.
+// Closed-loop example of thor::math::ThorQP with dynamic and static obstacles.
+//
+// A UR10 sweeps its base joint back and forth. The scene contains:
+//   - a person, tracked as two spheres (torso and hand), who walks towards the
+//     robot, stops, and reaches into the workspace with the hand;
+//   - a static fixture, a sphere standing on the other side of the sweep.
+// The robot itself is covered by spheres centered at some of its frames.
 //
 // Run:
 //   thor_math_cbf_mpc_example [path/to/robot.urdf] [--no-cbf]
 //
-// With the CBF the MPC slows the robot down (time scaling < 1) and, when
-// needed, brakes it, so that the barrier h stays non-negative: the robot can
-// always stop at least C + delta_H away from the person. With --no-cbf the
-// same MPC tracks the trajectory ignoring the person, to compare the minimum
-// distance reached.
+// With the CBF the MPC changes the motion so that, for every robot sphere and
+// every obstacle sphere, the barrier h stays non-negative: the robot can always
+// stop at least C + delta_H away from the obstacle surfaces. With --no-cbf the
+// same MPC tracks the trajectory ignoring the obstacles, to compare the
+// minimum clearance reached.
+//
+// The CBF does not know what an obstacle is: it only sees spheres with
+// position, velocity and acceleration. People, vehicles, other robots and
+// fixtures are handled the same way; only the numbers (radius, motion, delta_H)
+// change.
 //
 // The example shows, in order:
-//   1. loading the robot model and choosing the frames monitored by the CBF;
+//   1. loading the robot model and covering it with spheres;
 //   2. filling ThorConfig (horizon, weights, limits, CBF parameters);
 //   3. the control loop: nominal trajectory sampled at the scaled time,
-//      human measurements, ThorQP::solve(), fallback braking, integration;
+//      obstacle measurements, ThorQP::solve(), fallback braking, integration;
 //   4. the computation time of the MPC, compared with the control period.
 
 #include <thor_math/thor_math.h>
@@ -66,21 +76,36 @@ struct NominalTrajectory
 };
 
 // ---------------------------------------------------------------------------
-// Simulated person: two tracked points (torso and hand).
-//
-// In a real application these come from a perception system. ThorQP needs,
-// for each point, position, velocity and (optionally) acceleration in the
-// robot base frame. The CBF extrapolates them along the horizon with constant
-// acceleration, the same assumption used by the d_min formula.
+// Robot spheres: a frame and a radius that covers the link around it.
 // ---------------------------------------------------------------------------
-struct HumanSample
+struct RobotSphere
 {
-  std::vector<Eigen::Vector3d> pos, vel, acc;
+  const char* frame;
+  double      radius;  // [m]
 };
 
-HumanSample human(double t)
+// ---------------------------------------------------------------------------
+// Obstacle spheres.
+//
+// In a real application they come from a perception system: skeleton
+// keypoints with a radius per body part, tracked objects, or fixed elements of
+// the cell. ThorQP needs, for each sphere, the center position, velocity and
+// (optionally) acceleration in the robot base frame, its radius and,
+// optionally, its own distance estimation error delta_H. The CBF extrapolates
+// the centers along the horizon with constant acceleration, the same
+// assumption used by the d_min formula.
+// ---------------------------------------------------------------------------
+struct Obstacles
 {
-  // Torso walks along -x at 0.6 m/s, then brakes at 1.5 m/s^2 until it stops.
+  std::vector<const char*>     name;
+  std::vector<Eigen::Vector3d> pos, vel, acc;
+  std::vector<double>          radius, delta_H;
+};
+
+Obstacles scene(double t)
+{
+  // Person. The torso walks along -x at 0.6 m/s, then brakes at 1.5 m/s^2
+  // until it stops; the hand moves with the torso, ahead of it.
   const Eigen::Vector3d start(1.85, 0.72, 0.8);
   const double v_walk = 0.6, a_brake = 1.5;
   const double t_walk = 1.5, t_brake = v_walk / a_brake;
@@ -102,15 +127,31 @@ HumanSample human(double t)
   {
     x = -v_walk * t_walk - 0.5 * v_walk * t_brake;
   }
-
   const Eigen::Vector3d torso = start + Eigen::Vector3d(x, 0.0, 0.0);
-  const Eigen::Vector3d hand_offset(-0.35, -0.2, -0.1);  // the hand reaches towards the robot
+  const Eigen::Vector3d hand  = torso + Eigen::Vector3d(-0.35, -0.2, -0.1);
 
-  HumanSample h;
-  h.pos = {torso, torso + hand_offset};
-  h.vel = {Eigen::Vector3d(v, 0.0, 0.0), Eigen::Vector3d(v, 0.0, 0.0)};
-  h.acc = {Eigen::Vector3d(a, 0.0, 0.0), Eigen::Vector3d(a, 0.0, 0.0)};
-  return h;
+  // delta_H of each sphere from its perception noise (Eq. 9 of the paper):
+  // 99.9% confidence (beta = 3.291), position/velocity/acceleration noise
+  // standard deviations, and an upper bound of the stopping time. A hand
+  // keypoint is much noisier than the torso; the fixture is measured once,
+  // with a small, constant error.
+  using thor::math::cbf::perceptionMargin;
+  const double delta_torso   = perceptionMargin(3.291, 0.015, 0.072, 0.196, 0.3);
+  const double delta_hand    = perceptionMargin(3.291, 0.030, 0.150, 0.400, 0.3);
+  const double delta_fixture = 0.01;
+
+  // Static fixture on the other side of the sweep: zero velocity and
+  // acceleration. Nothing else distinguishes it from the person.
+  const Eigen::Vector3d fixture(0.70, -0.42, 0.65);
+
+  Obstacles o;
+  o.name    = {"torso", "hand", "fixture"};
+  o.pos     = {torso, hand, fixture};
+  o.vel     = {Eigen::Vector3d(v, 0.0, 0.0), Eigen::Vector3d(v, 0.0, 0.0), Eigen::Vector3d::Zero()};
+  o.acc     = {Eigen::Vector3d(a, 0.0, 0.0), Eigen::Vector3d(a, 0.0, 0.0), Eigen::Vector3d::Zero()};
+  o.radius  = {0.20, 0.06, 0.10};
+  o.delta_H = {delta_torso, delta_hand, delta_fixture};
+  return o;
 }
 
 // Computation time statistics of the MPC. A real-time loop must finish every
@@ -143,18 +184,20 @@ TimingStats timingStats(std::vector<double> samples, double budget)
   return stats;
 }
 
-// Current minimum robot-human distance over the monitored frames, computed
-// independently of the optimizer to compare runs with and without CBF.
-double currentDistance(const pinocchio::Model& model, pinocchio::Data& data,
-                       const Eigen::VectorXd& q, const std::vector<unsigned int>& frames,
-                       const std::vector<Eigen::Vector3d>& human_pos)
+// Current clearance (distance between surfaces) of every obstacle from the
+// robot spheres, computed independently of the optimizer to compare runs with
+// and without CBF.
+std::vector<double> clearances(const pinocchio::Model& model, pinocchio::Data& data,
+                               const Eigen::VectorXd& q, const std::vector<unsigned int>& frames,
+                               const std::vector<double>& frame_radii, const Obstacles& obstacles)
 {
   pinocchio::framesForwardKinematics(model, data, q);
-  double d = std::numeric_limits<double>::infinity();
-  for (const unsigned int f : frames)
-    for (const Eigen::Vector3d& p : human_pos)
-      d = std::min(d, (data.oMf[f].translation() - p).norm());
-  return d;
+  std::vector<double> c(obstacles.pos.size(), std::numeric_limits<double>::infinity());
+  for (std::size_t j = 0; j < frames.size(); ++j)
+    for (std::size_t k = 0; k < obstacles.pos.size(); ++k)
+      c[k] = std::min(c[k], (data.oMf[frames[j]].translation() - obstacles.pos[k]).norm()
+                            - frame_radii[j] - obstacles.radius[k]);
+  return c;
 }
 
 }  // namespace
@@ -173,12 +216,14 @@ int main(int argc, char** argv)
   }
 
   // -------------------------------------------------------------------------
-  // 1. Robot model
+  // 1. Robot model and robot spheres
   //
   // The CBF needs a Pinocchio model with nq == nv == number of joints. The
-  // monitored points are Pinocchio frames: here a few links plus the
-  // intermediate frames added along the arm, so that the whole arm, not only
-  // the tool, keeps its distance from the person.
+  // robot is covered by spheres centered at Pinocchio frames: a few links plus
+  // an intermediate frame added along the forearm, so that the whole arm, not
+  // only the tool, keeps its distance. Each radius covers the link around its
+  // frame. Without radii (cbf_frame_radii empty) the frames are points and the
+  // link size must be folded into the margin C.
   // -------------------------------------------------------------------------
   pinocchio::Model model;
   try
@@ -192,12 +237,18 @@ int main(int argc, char** argv)
   }
   const auto n_joints = static_cast<unsigned int>(model.nv);
 
+  const RobotSphere robot_spheres[] = {
+    {"forearm_link", 0.08}, {"elbow_joint_intermediate_2", 0.07}, {"wrist_1_link", 0.06},
+    {"wrist_3_link", 0.05}, {"tool0", 0.05}};
   std::vector<unsigned int> cbf_frames;
-  for (const char* name : {"forearm_link", "elbow_joint_intermediate_2", "wrist_1_link",
-                           "wrist_3_link", "tool0"})
+  std::vector<double> cbf_radii;
+  for (const RobotSphere& sphere : robot_spheres)
   {
-    if (model.existFrame(name))
-      cbf_frames.push_back(static_cast<unsigned int>(model.getFrameId(name)));
+    if (model.existFrame(sphere.frame))
+    {
+      cbf_frames.push_back(static_cast<unsigned int>(model.getFrameId(sphere.frame)));
+      cbf_radii.push_back(sphere.radius);
+    }
   }
   if (cbf_frames.empty())
   {
@@ -243,28 +294,30 @@ int main(int argc, char** argv)
   config.min_scaling = 0.0;
   config.max_scaling = 1.0;
 
-  // Control barrier function (see thor_math/cbf.h). For each monitored frame
-  // and human point the barrier is
+  // Control barrier function (see thor_math/cbf.h). For each robot sphere and
+  // obstacle sphere the barrier is
   //   h = d_min - C
-  // where d_min is the minimum distance reached if the robot reacts after T_r
-  // and then brakes at a_s while the person keeps its acceleration. Each
-  // control interval gets the constraint
-  //   dh/dt + gamma (h - h_chi delta_H) >= 0
-  // which keeps h >= h_chi delta_H, i.e. a non-negative barrier even for the
-  // worst-case distance d - delta_H.
+  // where d_min is the minimum distance between the two surfaces reached if
+  // the robot reacts after T_r and then brakes at a_s while the obstacle keeps
+  // its acceleration. The distance is the worst case allowed by the
+  // perception error, d - delta_H: in practice each obstacle sphere is
+  // inflated by its delta_H. Each control interval gets the constraint
+  //   dh/dt + gamma h >= 0
+  // which keeps h non-negative: the robot can always stop C away from the
+  // inflated obstacle.
   config.cbf     = use_cbf;
   config.a_s     = 2.5;    // robot braking deceleration [m/s^2]
   config.T_r     = 0.15;   // reaction time [s]
-  config.C       = 0.10;   // static safety margin [m]
+  config.C       = 0.05;   // safety margin between the surfaces [m]: sizes are in the radii
   config.gamma   = 5.0;    // class-K gain [1/s]: higher reacts later but harder
-  // delta_H from the perception noise (Eq. 9 of the paper): 99.9% confidence
-  // (beta = 3.291), position/velocity/acceleration noise std devs, and an
-  // upper bound of the stopping time.
+  // Default delta_H, used when ThorInput::obstacle_delta_H is empty. Here each
+  // obstacle provides its own, so this value is not used.
   config.delta_H = thor::math::cbf::perceptionMargin(3.291, 0.015, 0.072, 0.196, 0.3);
-  config.cbf_frame_ids  = cbf_frames;
-  config.n_human_points = 2;
+  config.cbf_frame_ids     = cbf_frames;
+  config.cbf_frame_radii   = cbf_radii;
+  config.n_obstacle_points = 3;  // torso, hand, fixture
   // Above this barrier value the CBF rows are dropped from the QP (all
-  // humans far away): a smaller and faster problem with the same solution.
+  // obstacles far away): a smaller and faster problem with the same solution.
   config.cbf_activation_distance = 5.0;
 
   // The model must be given before configure() when the CBF is enabled.
@@ -303,8 +356,7 @@ int main(int argc, char** argv)
 
   double tau = 0.0;      // trajectory time
   double scaling = 1.0;  // time scaling applied in the last cycle
-  double min_distance = std::numeric_limits<double>::infinity();
-  double min_h = std::numeric_limits<double>::infinity();
+  std::vector<double> min_clearance(config.n_obstacle_points, std::numeric_limits<double>::infinity());
   int fallback_cycles = 0;
 
   // Wall-clock time of every ThorQP::solve() call [us]. steady_clock is
@@ -314,13 +366,14 @@ int main(int argc, char** argv)
   std::vector<double> solve_us;
   solve_us.reserve(static_cast<std::size_t>(t_end / dt) + 1);
 
-  std::printf("CBF %s, delta_H = %.3f m\n", use_cbf ? "enabled" : "disabled", config.delta_H);
+  std::printf("CBF %s, %zu robot spheres, %u obstacle spheres\n",
+              use_cbf ? "enabled" : "disabled", cbf_frames.size(), config.n_obstacle_points);
 #ifndef NDEBUG
   std::printf("warning: built without optimizations, timings are not representative "
               "(configure with -DCMAKE_BUILD_TYPE=Release)\n");
 #endif
-  std::printf("%6s %7s %7s %8s %8s %6s %10s  %s\n",
-              "t[s]", "tau[s]", "s", "h_min", "dist", "human", "solve[us]", "frame");
+  std::printf("%6s %7s %7s %8s %8s %9s %10s  %s\n",
+              "t[s]", "tau[s]", "s", "h_min", "dist", "obstacle", "solve[us]", "robot frame");
 
   for (int k = 0; k * dt < t_end; ++k)
   {
@@ -341,23 +394,26 @@ int main(int argc, char** argv)
     // Desired scaling: 1 = nominal speed. A supervisor could lower it.
     in.target_scaling = 1.0;
 
-    // Human points (ignored when the CBF is disabled). Leaving all three
-    // vectors empty means "no person": n_human_points far-away, still points.
-    // human_acc may be left empty if no acceleration estimate is available.
-    const HumanSample h = human(t);
-    in.human_pos = h.pos;
-    in.human_vel = h.vel;
-    in.human_acc = h.acc;
+    // Obstacle spheres (ignored when the CBF is disabled). Leaving pos, vel
+    // and acc all empty means "no obstacle": n_obstacle_points far-away, still
+    // points. acc, radius and delta_H may each be left empty: zero
+    // acceleration, points, and ThorConfig::delta_H for every sphere.
+    const Obstacles obstacles = scene(t);
+    in.obstacle_pos     = obstacles.pos;
+    in.obstacle_vel     = obstacles.vel;
+    in.obstacle_acc     = obstacles.acc;
+    in.obstacle_radius  = obstacles.radius;
+    in.obstacle_delta_H = obstacles.delta_H;
 
-    // solve() throws std::runtime_error if the QP is infeasible, e.g. when
-    // the person moves faster than the robot can react. A real controller
-    // must then fall back to a safe command: here, brake as hard as allowed
-    // and freeze the progress along the path (as the cbf_python controller).
+    // solve() throws std::runtime_error if the QP is infeasible, e.g. when an
+    // obstacle moves faster than the robot can react. A real controller must
+    // then fall back to a safe command: here, brake as hard as allowed and
+    // freeze the progress along the path (as the cbf_python controller).
     //
     // Only solve() is timed: it builds the cost, evaluates the robot
-    // kinematics and the barrier for every interval, frame and human point,
-    // and runs the QP solver. A failed solve is timed too, since in a real
-    // loop it also consumes the cycle.
+    // kinematics and the barrier for every interval, robot sphere and
+    // obstacle sphere, and runs the QP solver. A failed solve is timed too,
+    // since in a real loop it also consumes the cycle.
     thor::math::ThorOutput out;
     bool solved = true;
     const Clock::time_point start = Clock::now();
@@ -377,15 +433,18 @@ int main(int argc, char** argv)
     {
       acc     = out.next_acc;      // joint accelerations of the first interval
       scaling = out.next_scaling;  // time scaling of the first interval
-      if (use_cbf)
-        min_h = std::min(min_h, out.cbf.h_min);
 
       if (k % 250 == 0)
       {
-        // out.cbf describes the most critical pair over the whole horizon.
-        std::printf("%6.2f %7.3f %7.3f %8.3f %8.3f %6u %10.1f  %s\n", t, tau, scaling,
-                    use_cbf ? out.cbf.h_min : std::nan(""), out.cbf.distance,
-                    out.cbf.human_index, elapsed_us,
+        // out.cbf describes the most critical pair over the whole horizon;
+        // distance is measured between the sphere surfaces. h_min is the
+        // barrier at the worst-case distance; on the later intervals it is
+        // computed on the previous prediction, so it can be briefly negative
+        // even when the actual motion is safe (see the clearances below).
+        std::printf("%6.2f %7.3f %7.3f %8.3f %8.3f %9s %10.1f  %s\n", t, tau, scaling,
+                    use_cbf ? out.cbf.h_min : std::nan(""),
+                    use_cbf ? out.cbf.distance : std::nan(""),
+                    use_cbf ? obstacles.name[out.cbf.obstacle_index] : "-", elapsed_us,
                     use_cbf ? model.frames[out.cbf.frame_id].name.c_str() : "-");
       }
     }
@@ -402,20 +461,26 @@ int main(int argc, char** argv)
     qp.updateState(acc);
     tau += scaling * dt;
 
-    min_distance = std::min(min_distance,
-                            currentDistance(model, data, qp.getState().head(n_joints), cbf_frames, h.pos));
+    const std::vector<double> c =
+      clearances(model, data, qp.getState().head(n_joints), cbf_frames, cbf_radii, obstacles);
+    for (std::size_t o = 0; o < c.size(); ++o)
+      min_clearance[o] = std::min(min_clearance[o], c[o]);
   }
 
-  std::printf("\nminimum robot-human distance: %.3f m\n", min_distance);
-  if (use_cbf)
-    std::printf("minimum barrier value:        %.3f m\n", min_h);
-  std::printf("trajectory progress:          %.2f s of %.2f s\n", tau, t_end);
-  std::printf("fallback braking cycles:      %d\n", fallback_cycles);
+  // Clearance is the distance between the robot and obstacle surfaces: a
+  // negative value is a collision of the spheres.
+  std::printf("\nminimum clearance per obstacle:\n");
+  const Obstacles names = scene(0.0);
+  for (std::size_t o = 0; o < min_clearance.size(); ++o)
+    std::printf("  %-8s %7.3f m%s\n", names.name[o], min_clearance[o],
+                min_clearance[o] < 0.0 ? "   <- collision" : "");
+  std::printf("trajectory progress:       %.2f s of %.2f s\n", tau, t_end);
+  std::printf("fallback braking cycles:   %d\n", fallback_cycles);
 
   // The budget is the control period: a solve longer than dt misses the
-  // deadline of the 500 Hz loop. The CBF adds n_intervals * frames * humans
-  // rows (here 5 * 5 * 2 = 50) and one kinematics evaluation per interval,
-  // so compare with --no-cbf to see its cost.
+  // deadline of the 500 Hz loop. The CBF adds n_intervals * robot spheres *
+  // obstacle spheres rows (here 5 * 5 * 3 = 75) and one kinematics evaluation
+  // per interval, so compare with --no-cbf to see its cost.
   const double budget_us = dt * 1e6;
   const TimingStats timing = timingStats(solve_us, budget_us);
   std::printf("\nMPC computation time over %zu solves [us]:\n", solve_us.size());

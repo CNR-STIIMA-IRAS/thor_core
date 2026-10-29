@@ -4,6 +4,7 @@ PROJECT_NUMBER         = "@PROJECT_VERSION@"
 PROJECT_BRIEF          = "MPC with time scaling and control barrier function"
 OUTPUT_DIRECTORY       = "@THOR_MATH_DOCS_OUTPUT_DIR@"
 INPUT                  = "@CMAKE_CURRENT_SOURCE_DIR@/docs/api.md" \
+                         "@CMAKE_CURRENT_SOURCE_DIR@/docs/robust_margin_deadlock.md" \
                          "@CMAKE_CURRENT_SOURCE_DIR@/include/thor_math"
 FILE_PATTERNS          = *.h *.md
 RECURSIVE              = NO

@@ -202,7 +202,7 @@ TEST(ThorQp, ConfigureSetsFlagsAndMatrixLayout)
   EXPECT_TRUE(qp.arePositionBoundsActive());
   EXPECT_FALSE(qp.cbfBoundsActive());
   EXPECT_DOUBLE_EQ(qp.getDt(), 0.05);
-  EXPECT_DOUBLE_EQ(qp.getNumPh(), 0.0);
+  EXPECT_EQ(qp.getNumObstaclePoints(), 0U);
   EXPECT_EQ(qp.getPredictionTimeInstant().size(), 3);
   EXPECT_EQ(qp.inequalityCount(), 8 * 3 * 2 + 2 * 3);
 
@@ -446,7 +446,7 @@ TEST(LegacyApi, SettersUpdateFlagsAndMatrixLayout)
   EXPECT_TRUE(qp.needUpdate());
   EXPECT_TRUE(qp.inputBlockingActive());
   EXPECT_DOUBLE_EQ(qp.getDt(), 0.05);
-  EXPECT_DOUBLE_EQ(qp.getNumPh(), 0.0);
+  EXPECT_EQ(qp.getNumObstaclePoints(), 0U);
 
   qp.activatePositionBounds(true);
   qp.activateTorqueBounds(true);

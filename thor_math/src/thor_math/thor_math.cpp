@@ -203,7 +203,7 @@ namespace math
       m_gamma(0.0),
       m_delta_H(0.0),
       m_h(0.0),
-      m_num_ph(0)
+      m_n_obstacle_points(0)
   {
   }
 
@@ -331,7 +331,8 @@ namespace math
   void ThorQP::setCbfIds(const std::vector<unsigned int>& frameIds, const int& num_ph)
   {
     m_frameIds = frameIds;
-    m_num_ph = num_ph;
+    m_frame_radii.assign(frameIds.size(), 0.0);
+    m_n_obstacle_points = num_ph;
     m_are_matrices_updated = false;
   }
 
@@ -459,15 +460,15 @@ namespace math
   //       m_ci0.segment(9*m_nc*m_nax+2*m_nc+ic*m_nax,m_nax)= m_tau_max;
   //     }
   //   }
-    // 1 constraint for each frame - human point couple (TODO) and prediction interval
+    // 1 constraint for each robot sphere, obstacle point and prediction interval
     if (m_use_cbf)
     {
       int old_cols=m_CI.cols();
-      m_CI.conservativeResize(m_CI.rows(), m_CI.cols() + m_num_ph * m_frameIds.size() * m_nc);
-      m_ci0.conservativeResize(m_ci0.size() + m_num_ph * m_frameIds.size() * m_nc);
+      m_CI.conservativeResize(m_CI.rows(), m_CI.cols() + m_n_obstacle_points * m_frameIds.size() * m_nc);
+      m_ci0.conservativeResize(m_ci0.size() + m_n_obstacle_points * m_frameIds.size() * m_nc);
 
-      m_CI.block(0,old_cols, m_CI.rows(), m_num_ph * m_frameIds.size()*m_nc).setZero();
-      m_ci0.tail(m_num_ph * m_frameIds.size()*m_nc).setZero();
+      m_CI.block(0,old_cols, m_CI.rows(), m_n_obstacle_points * m_frameIds.size()*m_nc).setZero();
+      m_ci0.tail(m_n_obstacle_points * m_frameIds.size()*m_nc).setZero();
     }
 
     m_next_position_forced_resp=m_position_forced_resp.topRows(m_nax);
@@ -585,8 +586,6 @@ namespace math
     const Eigen::VectorXd& next_targetQ = in.next_target_q;
     const double& target_scaling = in.target_scaling;
     const Eigen::VectorXd& x0 = in.x0;
-    const std::vector<Eigen::Vector3d>& v_h_vector = in.human_vel;
-    const std::vector<Eigen::Vector3d>& p_h_vector = in.human_pos;
     Eigen::VectorXd& next_acc = out.next_acc;
     double& next_scaling = out.next_scaling;
     out.cbf = CbfDiagnostics();
@@ -615,13 +614,17 @@ namespace math
     //   }
     // }
 
-    // CBF constraints: one for each prediction interval, frame and human point.
+    // CBF constraints: one for each prediction interval, robot sphere and obstacle sphere.
     // Interval i starts from the current state (i == 0) or from the end of
     // interval i-1 of the previous prediction, and u_i is its acceleration:
-    //   L_g h (J u_i + dJ dq) + L_f h + gamma (h - h_chi delta_H) >= 0
-    // h - h_chi delta_H bounds the barrier at the worst-case distance d - delta_H.
-    // cbf_python (and the paper) add + h_chi delta_H instead, which relaxes the
-    // constraint and mixes m with m/s.
+    //   L_g h (J u_i + dJ dq) + L_f h + gamma h >= 0
+    // where h is evaluated at the worst-case distance between the surfaces,
+    // d = |p_r - p_o| - r_robot - r_obstacle - delta_H: the perception error
+    // inflates the obstacle sphere. cbf_python (and the paper) add
+    // + h_chi delta_H instead, which relaxes the constraint and mixes m with
+    // m/s; its first-order correction - h_chi delta_H would move the safe-set
+    // boundary away from where the escape term of the barrier acts, and a robot
+    // stopped on it could never move again.
     // With a single interval and delta_H = 0 this is the one-step controller of cbf_python.
     if (m_use_cbf)
     {
@@ -653,14 +656,15 @@ namespace math
           pinocchio::getFrameJacobianTimeVariation(m_model, m_data, frameId, pinocchio::LOCAL_WORLD_ALIGNED, dJ);
           const Eigen::Vector3d dJdq = dJ.topRows<3>() * dq;
 
-          for (std::size_t k = 0; k < static_cast<std::size_t>(m_num_ph); ++k)
+          for (std::size_t k = 0; k < static_cast<std::size_t>(m_n_obstacle_points); ++k)
           {
-            // Human point extrapolated with constant acceleration, as in d_min.
-            const Eigen::Vector3d& a_h = in.human_acc[k];
-            const Eigen::Vector3d p_h = p_h_vector[k] + v_h_vector[k] * t_start + 0.5 * a_h * t_start * t_start;
-            const Eigen::Vector3d v_h = v_h_vector[k] + a_h * t_start;
+            // Obstacle point extrapolated with constant acceleration, as in d_min.
+            const Eigen::Vector3d& a_o = in.obstacle_acc[k];
+            const Eigen::Vector3d p_o = in.obstacle_pos[k] + in.obstacle_vel[k] * t_start + 0.5 * a_o * t_start * t_start;
+            const Eigen::Vector3d v_o = in.obstacle_vel[k] + a_o * t_start;
+            const double radius = m_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k];
 
-            const cbf::BarrierTerms b = cbf::barrierTerms(p_r, v_r, p_h, v_h, a_h, m_T_r, m_a_s, m_C);
+            const cbf::BarrierTerms b = cbf::barrierTerms(p_r, v_r, p_o, v_o, a_o, m_T_r, m_a_s, m_C, radius);
 
             if (b.h < h_min)
             {
@@ -668,16 +672,16 @@ namespace math
               out.cbf.h_min = b.h;
               out.cbf.interval = i;
               out.cbf.frame_id = frameId;
-              out.cbf.distance = b.d;
-              out.cbf.v_rel = b.v_r;
-              out.cbf.vh_proj = b.v_h;
-              out.cbf.human_index = k;
+              out.cbf.distance = b.d + in.obstacle_delta_H[k];
+              out.cbf.v_robot = b.v_r;
+              out.cbf.v_obstacle = b.v_o;
+              out.cbf.obstacle_index = k;
             }
 
             // Store each barrier constraint as a column: CI^T x + ci0 >= 0.
-            const Eigen::Index col = n_cols - m_num_ph * m_nc * (j+1) + m_num_ph * i + k;
+            const Eigen::Index col = n_cols - m_n_obstacle_points * m_nc * (j+1) + m_n_obstacle_points * i + k;
             m_CI.col(col).segment(m_nax * i, m_nax) = J.topRows<3>().transpose() * b.lie_g;
-            ci0(col) = b.lie_g.dot(dJdq) + b.lie_f + m_gamma * (b.h - b.h_chi * m_delta_H);
+            ci0(col) = b.lie_g.dot(dJdq) + b.lie_f + m_gamma * b.h;
           }
         }
       }
@@ -686,7 +690,7 @@ namespace math
     Eigen::Index inequality_count = m_CI.cols();
     if (m_use_cbf && m_h > m_cbf_activation_distance)
     {
-      inequality_count -= m_nc * m_frameIds.size() * m_num_ph;
+      inequality_count -= m_nc * m_frameIds.size() * m_n_obstacle_points;
     }
     const Eigen::Index equality_count = m_CE.cols();
     Eigen::MatrixXd constraints(equality_count + inequality_count, m_H.rows());
@@ -788,11 +792,16 @@ namespace math
         throw std::invalid_argument("a_s and C must be positive");
       if (!(config.T_r >= 0.0) || !(config.delta_H >= 0.0))
         throw std::invalid_argument("T_r and delta_H must not be negative");
-      if (config.n_human_points < 0)
-        throw std::invalid_argument("n_human_points must not be negative");
+      if (config.n_obstacle_points < 0)
+        throw std::invalid_argument("n_obstacle_points must not be negative");
       for (const unsigned int frame_id : config.cbf_frame_ids)
         if (frame_id >= m_model.frames.size())
           throw std::invalid_argument("cbf frame id " + std::to_string(frame_id) + " is not in the model");
+      if (!config.cbf_frame_radii.empty() && config.cbf_frame_radii.size() != config.cbf_frame_ids.size())
+        throw std::invalid_argument("cbf_frame_radii must be empty or have the size of cbf_frame_ids");
+      for (const double radius : config.cbf_frame_radii)
+        if (!(radius >= 0.0))
+          throw std::invalid_argument("cbf_frame_radii must not be negative");
     }
 
     m_nc = config.n_intervals;
@@ -825,7 +834,9 @@ namespace math
     m_delta_H = config.delta_H;
     m_cbf_activation_distance = config.cbf_activation_distance;
     m_frameIds = config.cbf_frame_ids;
-    m_num_ph = config.n_human_points;
+    m_frame_radii = config.cbf_frame_radii;
+    m_frame_radii.resize(m_frameIds.size(), 0.0);
+    m_n_obstacle_points = config.n_obstacle_points;
 
     updateMatrices();
   }
@@ -846,20 +857,31 @@ namespace math
       return out;
     }
     ThorInput with_defaults = in;
-    if (in.human_pos.empty() && in.human_vel.empty() && in.human_acc.empty())
+    if (in.obstacle_pos.empty() && in.obstacle_vel.empty() && in.obstacle_acc.empty())
     {
-      // No human data: assume n_human_points far-away, still humans.
-      with_defaults.human_pos.assign(m_num_ph, Eigen::Vector3d::Constant(100.0));
-      with_defaults.human_vel.assign(m_num_ph, Eigen::Vector3d::Zero());
+      // No obstacle data: assume n_obstacle_points far-away, still points.
+      with_defaults.obstacle_pos.assign(m_n_obstacle_points, Eigen::Vector3d::Constant(100.0));
+      with_defaults.obstacle_vel.assign(m_n_obstacle_points, Eigen::Vector3d::Zero());
     }
-    if (in.human_acc.empty())
-      with_defaults.human_acc.assign(with_defaults.human_pos.size(), Eigen::Vector3d::Zero());
-    const std::size_t n_human = with_defaults.human_pos.size();
-    if (with_defaults.human_vel.size() != n_human || with_defaults.human_acc.size() != n_human ||
-        n_human < static_cast<std::size_t>(m_num_ph))
+    const std::size_t n_obstacles = with_defaults.obstacle_pos.size();
+    if (in.obstacle_acc.empty())
+      with_defaults.obstacle_acc.assign(n_obstacles, Eigen::Vector3d::Zero());
+    if (in.obstacle_radius.empty())
+      with_defaults.obstacle_radius.assign(n_obstacles, 0.0);
+    if (in.obstacle_delta_H.empty())
+      with_defaults.obstacle_delta_H.assign(n_obstacles, m_delta_H);
+    if (with_defaults.obstacle_vel.size() != n_obstacles || with_defaults.obstacle_acc.size() != n_obstacles ||
+        with_defaults.obstacle_radius.size() != n_obstacles || with_defaults.obstacle_delta_H.size() != n_obstacles ||
+        n_obstacles < static_cast<std::size_t>(m_n_obstacle_points))
     {
-      throw std::invalid_argument("human_pos, human_vel and human_acc (if given) must have the same size, "
-                                  "at least n_human_points (" + std::to_string(m_num_ph) + ")");
+      throw std::invalid_argument("obstacle_pos, obstacle_vel and, if given, obstacle_acc, obstacle_radius and "
+                                  "obstacle_delta_H must have the same size, at least n_obstacle_points (" +
+                                  std::to_string(m_n_obstacle_points) + ")");
+    }
+    for (std::size_t k = 0; k < n_obstacles; ++k)
+    {
+      if (!(with_defaults.obstacle_radius[k] >= 0.0) || !(with_defaults.obstacle_delta_H[k] >= 0.0))
+        throw std::invalid_argument("obstacle_radius and obstacle_delta_H must not be negative");
     }
     doSolve(with_defaults, out);
     return out;
@@ -868,7 +890,7 @@ namespace math
   std::vector<double> ThorQP::toLegacyDiagnostics ( const CbfDiagnostics& cbf )
   {
     return {cbf.h_min, static_cast<double>(cbf.interval), static_cast<double>(cbf.frame_id),
-            cbf.distance, cbf.v_rel, cbf.vh_proj};
+            cbf.distance, cbf.v_robot, cbf.v_obstacle};
   }
 
   std::vector<double> ThorQP::computedCostrainedSolution ( const Eigen::VectorXd& targetDq,
@@ -877,10 +899,10 @@ namespace math
                                                            const Eigen::VectorXd& x0,
                                                            Eigen::VectorXd& next_acc,
                                                            double& next_scaling,
-                                                           const std::vector<Eigen::Vector3d> &v_h_vector,
-                                                           const std::vector<Eigen::Vector3d> &p_h_vector )
+                                                           const std::vector<Eigen::Vector3d> &v_o_vector,
+                                                           const std::vector<Eigen::Vector3d> &p_o_vector )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_h_vector, v_h_vector, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_o_vector, v_o_vector, {}, {}, {}});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);
@@ -893,7 +915,7 @@ namespace math
                                                            Eigen::VectorXd& next_acc,
                                                            double& next_scaling )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}, {}, {}});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);

@@ -9,18 +9,22 @@
 
 /**
  * @file cbf.h
- * @brief Control barrier function for speed and separation monitoring.
+ * @brief Control barrier function for speed and separation monitoring with
+ *        dynamic obstacles.
  *
  * C++ port of `cbf_python/controllers/kernels/ssm_cbf_acc.py`
  * (JRL-CARI-CNR-UNIBS/cbf_python, branch `dynamic_parameters`), checked
- * against its output to 1e-12.
+ * against its output to 1e-12. The paper considers people; the formulation
+ * holds for any obstacle point that keeps its acceleration while the robot
+ * stops (a person, a vehicle, another robot, a static object).
  *
- * For a robot point `p_r` and a human point `p_h`, with `d = |p_r - p_h|` and
- * `u = (p_r - p_h)/d`, the barrier depends on `psi = [d, v_r, v_h, a_h]`:
- * - `d`   distance [m];
+ * The robot point and the obstacle point are spheres of radii `r_r` and `r_o`
+ * (zero for points). With `u = (p_r - p_o)/|p_r - p_o|` the barrier depends on
+ * `psi = [d, v_r, v_o, a_o]`:
+ * - `d = |p_r - p_o| - r_r - r_o` distance between the surfaces [m];
  * - `v_r` robot velocity along `u` [m/s] (negative: approaching);
- * - `v_h` human velocity along `u` [m/s] (positive: approaching);
- * - `a_h` human acceleration along `u` [m/s^2].
+ * - `v_o` obstacle velocity along `u` [m/s] (positive: approaching);
+ * - `a_o` obstacle acceleration along `u` [m/s^2].
  *
  * The robot point acceleration is the control input. ThorQP maps it to the
  * joint accelerations with the frame Jacobian: `a_r = J ddq + dJ dq`.
@@ -40,16 +44,16 @@ namespace cbf
 {
 
 /**
- * @brief Minimum robot-human distance over the robot stopping manoeuvre.
+ * @brief Minimum robot-obstacle distance over the robot stopping manoeuvre.
  *
  * The robot keeps its velocity for the reaction time @p T_r, then brakes
- * with deceleration @p a_s until it stops; the human keeps the constant
- * acceleration @p a_h. Along `u` the distance is
- * `d(t) = d + (v_r - v_h) t - a_h t^2/2 (+ a_s (t - T_r)^2/2 for t > T_r)`.
+ * with deceleration @p a_s until it stops; the obstacle keeps the constant
+ * acceleration @p a_o. Along `u` the distance is
+ * `d(t) = d + (v_r - v_o) t - a_o t^2/2 (+ a_s (t - T_r)^2/2 for t > T_r)`.
  * The minimum is searched among the start, the end of the reaction (receding
  * robot) or the stop (approaching robot), and the interior stationary points.
  *
- * @param d, v_r, v_h, a_h  components of `psi`.
+ * @param d, v_r, v_o, a_o  components of `psi`.
  * @param T_r     reaction time [s] (>= 0).
  * @param a_s     robot braking deceleration [m/s^2] (> 0).
  * @param atol    tolerance to compare times and to skip null denominators.
@@ -58,7 +62,7 @@ namespace cbf
  * @return `d_min` [m]; it can be negative if a contact cannot be avoided.
  * @throws std::invalid_argument if @p a_s is not positive.
  */
-double minimumDistance( double d, double v_r, double v_h, double a_h,
+double minimumDistance( double d, double v_r, double v_o, double a_o,
                         double T_r, double a_s, double atol,
                         Eigen::Vector4d& jacobian );
 
@@ -69,49 +73,56 @@ double minimumDistance( double d, double v_r, double v_h, double a_h,
  * added, so that inside the margin a robot moving away (`v_r > 0`) increases
  * `h` and is allowed to escape.
  *
- * @param d, v_r, v_h, a_h, T_r, a_s, atol  as in minimumDistance().
+ * @param d, v_r, v_o, a_o, T_r, a_s, atol  as in minimumDistance().
  * @param C       static safety margin [m] (> 0).
  * @param[out] jacobian `dh/d(psi)`.
  * @return `h` [m]; the safe set is `h >= 0`.
  */
-double barrier( double d, double v_r, double v_h, double a_h,
+double barrier( double d, double v_r, double v_o, double a_o,
                 double T_r, double a_s, double C, double atol,
                 Eigen::Vector4d& jacobian );
 
-/// @brief Barrier value and Lie derivatives of one robot-human pair, from barrierTerms().
+/// @brief Barrier value and Lie derivatives of one robot-obstacle pair, from barrierTerms().
 struct BarrierTerms
 {
   double          h     = 0.0;  ///< Barrier value [m].
   double          lie_f = 0.0;  ///< `L_f h`: rate of `h` with zero robot point acceleration [m/s].
   Eigen::Vector3d lie_g = Eigen::Vector3d::Zero();  ///< `L_g h`: `dh/dt = L_f h + L_g h . a_r` [s].
   double          h_chi = 0.0;  ///< `dh/dd`, sensitivity of `h` to a distance error.
-  double          d     = 0.0;  ///< Distance [m].
+  double          d     = 0.0;  ///< Distance between the sphere surfaces [m] (negative if they overlap).
   double          v_r   = 0.0;  ///< Robot velocity along `u` [m/s].
-  double          v_h   = 0.0;  ///< Human velocity along `u` [m/s].
-  double          a_h   = 0.0;  ///< Human acceleration along `u` [m/s^2].
+  double          v_o   = 0.0;  ///< Obstacle velocity along `u` [m/s].
+  double          a_o   = 0.0;  ///< Obstacle acceleration along `u` [m/s^2].
 };
 
 /**
- * @brief Barrier value and Lie derivatives of a robot point and a human point.
+ * @brief Barrier value and Lie derivatives of a robot sphere and an obstacle
+ *        sphere.
  *
- * The Lie derivatives include the rotation of `u` (`du/dt = (I - u u^T)(v_r -
- * v_h)/d`) and the human acceleration. The CBF condition used by ThorQP is
- * `L_f h + L_g h . a_r + gamma (h - h_chi delta_H) >= 0`.
+ * The barrier uses the distance between the surfaces,
+ * `d = |p_r - p_o| - radius`. The Lie derivatives include the rotation of `u`
+ * (`du/dt = (I - u u^T)(v_r - v_o)/|p_r - p_o|`) and the obstacle
+ * acceleration; since the radii are constant they are the same as for points.
+ * The CBF condition used by ThorQP is `L_f h + L_g h . a_r + gamma h >= 0`,
+ * with @p radius including the distance estimation error `delta_H`: the
+ * barrier is evaluated at the worst-case distance.
  *
- * If the points coincide (`d <= atol`), `u` is the x axis and `d = atol`.
+ * If the centers coincide (`|p_r - p_o| <= atol`), `u` is the x axis.
  *
- * @param p_r, v_r       robot point position [m] and velocity [m/s].
- * @param p_h, v_h, a_h  human point position, velocity and acceleration.
+ * @param p_r, v_r       robot sphere center position [m] and velocity [m/s].
+ * @param p_o, v_o, a_o  obstacle sphere center position, velocity and acceleration.
  * @param T_r, a_s, C    as in barrier().
+ * @param radius         sum of the two radii `r_r + r_o` [m] (0 for points).
  * @param atol           as in minimumDistance().
  */
 BarrierTerms barrierTerms( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r,
-                           const Eigen::Vector3d& p_h, const Eigen::Vector3d& v_h,
-                           const Eigen::Vector3d& a_h,
-                           double T_r, double a_s, double C, double atol = 1e-12 );
+                           const Eigen::Vector3d& p_o, const Eigen::Vector3d& v_o,
+                           const Eigen::Vector3d& a_o,
+                           double T_r, double a_s, double C,
+                           double radius = 0.0, double atol = 1e-12 );
 
 /**
- * @brief Maximum error of the estimated robot-human distance (Eq. 9 of the paper).
+ * @brief Maximum error of the estimated robot-obstacle distance (Eq. 9 of the paper).
  *
  * `delta_H = beta (sigma_p + sigma_v T_f_bar + sigma_a T_f_bar^2 / 2)`: the
  * position error accumulated over the stopping time by noisy position,
@@ -122,7 +133,10 @@ BarrierTerms barrierTerms( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_
  * @param sigma_v velocity noise standard deviation [m/s].
  * @param sigma_a acceleration noise standard deviation [m/s^2].
  * @param T_f_bar upper bound of the stopping time [s].
- * @return `delta_H` [m], to be used as ThorConfig::delta_H.
+ * @return `delta_H` [m], to be used as ThorConfig::delta_H or
+ *         ThorInput::obstacle_delta_H. The barrier is evaluated at the
+ *         worst-case distance `d - delta_H`, which is the same as inflating the
+ *         obstacle sphere by `delta_H`.
  */
 double perceptionMargin( double beta, double sigma_p, double sigma_v, double sigma_a, double T_f_bar );
 

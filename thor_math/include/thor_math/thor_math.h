@@ -36,7 +36,8 @@
 /**
  * @file thor_math.h
  * @brief Model predictive controller with time scaling and an optional control
- *        barrier function for human-robot collaboration.
+ *        barrier function for collision avoidance with dynamic obstacles
+ *        (people, vehicles, other robots, static objects).
  *
  * The main entry point is thor::math::ThorQP. The free functions build the
  * prediction (evolution) matrices of a chain of double integrators and are
@@ -242,32 +243,38 @@ struct ThorConfig
   /// @}
 
   /// @name Control barrier function
-  /// See cbf.h. Checked only when #cbf is true.
+  /// See cbf.h. Checked only when #cbf is true. The robot is monitored at
+  /// spheres centered at #cbf_frame_ids, the obstacles are spheres centered at
+  /// ThorInput::obstacle_pos; the barrier uses the distance between surfaces.
   /// @{
   bool   cbf     = false;  ///< Enables the CBF constraints. Needs a Pinocchio model with `nq == nv == n_joints`.
   double a_s     = 0.0;    ///< Robot braking deceleration in the `d_min` formula [m/s^2] (> 0).
   double T_r     = 0.0;    ///< Reaction time before braking [s] (>= 0).
-  double C       = 0.0;    ///< Static safety margin `C_0` [m] (> 0).
+  double C       = 0.0;    ///< Safety margin `C_0` between the robot and obstacle surfaces [m] (> 0).
   double gamma   = 0.0;    ///< Class-K gain of `dh/dt + gamma h >= 0` [1/s].
-  double delta_H = 0.0;    ///< Distance estimation error [m] (>= 0); see cbf::perceptionMargin().
+  double delta_H = 0.0;    ///< Default distance estimation error [m] (>= 0), used when ThorInput::obstacle_delta_H is empty. The barrier is evaluated at the worst-case distance, i.e. the obstacle sphere is inflated by delta_H; see cbf::perceptionMargin().
   double cbf_activation_distance = 5.0;  ///< If the lowest barrier over the horizon is above this value [m], the CBF rows are dropped from the QP.
-  std::vector<unsigned int> cbf_frame_ids;  ///< Pinocchio frame ids of the monitored robot points.
-  int    n_human_points = 0;  ///< Number of human points per cycle (>= 0).
+  std::vector<unsigned int> cbf_frame_ids;  ///< Pinocchio frame ids of the centers of the monitored robot spheres.
+  std::vector<double> cbf_frame_radii;  ///< Radius of each robot sphere [m] (>= 0), same size as #cbf_frame_ids; empty means points.
+  int    n_obstacle_points = 0;  ///< Number of obstacle points per cycle (>= 0).
   /// @}
 };
 
 /**
  * @brief Inputs of one control cycle of ThorQP::solve().
  *
- * The human vectors are ignored when the CBF is disabled. When it is enabled:
- * - if #human_pos, #human_vel and #human_acc are all empty, ThorConfig::n_human_points
- *   still points at `(100, 100, 100)` are used (no person);
- * - otherwise #human_pos and #human_vel must have the same size, at least
- *   ThorConfig::n_human_points, and #human_acc must be empty (zero
- *   accelerations) or have that size too. Only the first
- *   ThorConfig::n_human_points points are used.
+ * The obstacle vectors are ignored when the CBF is disabled. When it is enabled:
+ * - if #obstacle_pos, #obstacle_vel and #obstacle_acc are all empty,
+ *   ThorConfig::n_obstacle_points still points at `(100, 100, 100)` are used
+ *   (no obstacle);
+ * - otherwise #obstacle_pos and #obstacle_vel must have the same size, at
+ *   least ThorConfig::n_obstacle_points;
+ * - #obstacle_acc, #obstacle_radius and #obstacle_delta_H may be empty
+ *   (defaults: zero acceleration, zero radius, ThorConfig::delta_H) or have
+ *   the size of #obstacle_pos.
  *
- * Positions, velocities and accelerations are in the Pinocchio world frame.
+ * Only the first ThorConfig::n_obstacle_points points are used. Positions,
+ * velocities and accelerations are in the Pinocchio world frame.
  */
 struct ThorInput
 {
@@ -275,25 +282,27 @@ struct ThorInput
   Eigen::VectorXd next_target_q;   ///< Target position at the first prediction time, size `n_joints`.
   double          target_scaling = 1.0;  ///< Desired time scaling (1 = nominal speed).
   Eigen::VectorXd x0;              ///< Current state `[q; dq]`, size `2*n_joints`.
-  std::vector<Eigen::Vector3d> human_pos;  ///< Human point positions [m].
-  std::vector<Eigen::Vector3d> human_vel;  ///< Human point velocities [m/s].
-  std::vector<Eigen::Vector3d> human_acc;  ///< Human point accelerations [m/s^2]; empty means zero.
+  std::vector<Eigen::Vector3d> obstacle_pos;  ///< Obstacle sphere centers [m].
+  std::vector<Eigen::Vector3d> obstacle_vel;  ///< Obstacle velocities [m/s].
+  std::vector<Eigen::Vector3d> obstacle_acc;  ///< Obstacle accelerations [m/s^2]; empty means zero.
+  std::vector<double> obstacle_radius;        ///< Obstacle sphere radii [m] (>= 0); empty means points.
+  std::vector<double> obstacle_delta_H;       ///< Distance estimation error of each point [m] (>= 0), added to its radius by the barrier; empty means ThorConfig::delta_H for all.
 };
 
 /**
- * @brief Robot-human pair with the lowest barrier value over the horizon.
+ * @brief Robot-obstacle pair with the lowest barrier value over the horizon.
  *
  * All fields are zero when the CBF is disabled.
  */
 struct CbfDiagnostics
 {
-  double       h_min       = 0.0;  ///< Lowest barrier value [m].
-  unsigned int interval    = 0;    ///< Control interval where it occurs.
-  unsigned int frame_id    = 0;    ///< Pinocchio frame id of the robot point.
-  double       distance    = 0.0;  ///< Robot-human distance `d` [m].
-  double       v_rel       = 0.0;  ///< Robot velocity along `(p_r - p_h)/d` [m/s]; negative when approaching.
-  double       vh_proj     = 0.0;  ///< Human velocity along `(p_r - p_h)/d` [m/s]; positive when approaching.
-  unsigned int human_index = 0;    ///< Index of the human point in ThorInput::human_pos.
+  double       h_min          = 0.0;  ///< Lowest barrier value [m], at the worst-case distance. For intervals after the first it is computed on the previous prediction and can be negative even if the actual motion is safe.
+  unsigned int interval       = 0;    ///< Control interval where it occurs.
+  unsigned int frame_id       = 0;    ///< Pinocchio frame id of the robot sphere.
+  double       distance       = 0.0;  ///< Estimated distance between the robot and obstacle surfaces [m], not reduced by delta_H (negative if they overlap).
+  double       v_robot        = 0.0;  ///< Robot velocity along `(p_r - p_o)/|p_r - p_o|` [m/s]; negative when approaching.
+  double       v_obstacle     = 0.0;  ///< Obstacle velocity along the same direction [m/s]; positive when approaching.
+  unsigned int obstacle_index = 0;    ///< Index of the obstacle point in ThorInput::obstacle_pos.
 };
 
 /// @brief Result of ThorQP::solve().
@@ -301,7 +310,7 @@ struct ThorOutput
 {
   Eigen::VectorXd next_acc;            ///< Joint accelerations to apply during the next control period, size `n_joints`.
   double          next_scaling = 0.0;  ///< Time scaling of the first interval: advance the trajectory time by `next_scaling * dt`.
-  CbfDiagnostics  cbf;                 ///< Most critical robot-human pair (CBF enabled only).
+  CbfDiagnostics  cbf;                 ///< Most critical robot-obstacle pair (CBF enabled only).
 };
 
 
@@ -313,8 +322,8 @@ struct ThorOutput
  * control intervals. The decision variables are one joint acceleration vector
  * and one time scaling per interval. The cost tracks the scaled target
  * velocities; the constraints bound accelerations, velocities, optionally
- * positions, and, with the CBF, keep a barrier on the robot-human distance
- * non-negative (see cbf.h and docs/api.md).
+ * positions, and, with the CBF, keep a barrier on the distance from dynamic
+ * obstacles non-negative (see cbf.h and docs/api.md).
  *
  * Typical use:
  * @code
@@ -323,7 +332,7 @@ struct ThorOutput
  * qp.configure(config);           // validates and builds the matrices
  * qp.setInitialState(x0);
  * while (running) {
- *   thor::math::ThorInput in;     // targets, x0, human points
+ *   thor::math::ThorInput in;     // targets, x0, obstacle points
  *   ...
  *   thor::math::ThorOutput out = qp.solve(in);
  *   qp.updateState(out.next_acc); // or read x0 from the robot
@@ -414,8 +423,9 @@ class ThorQP
     double             m_gamma;           // CBF gain
     double             m_delta_H;         // distance estimation error
     double             m_h;               // barrier value
-    int                m_num_ph;          // number of human points considered  
+    int                m_n_obstacle_points; // number of obstacle points considered
     std::vector<unsigned int> m_frameIds;
+    std::vector<double> m_frame_radii;    // robot sphere radii, one per frame
     /// @endcond
 
     /**
@@ -431,15 +441,15 @@ class ThorQP
     /**
      * @brief Customization point of the constrained solver.
      *
-     * Called by solve() with validated inputs; with the CBF enabled the human
-     * vectors have at least `n_human_points` elements and #ThorInput::human_acc
-     * is filled. Subclasses override this, so that the public solve() and
+     * Called by solve() with validated inputs; with the CBF enabled the
+     * obstacle vectors have at least `n_obstacle_points` elements and
+     * ThorInput::obstacle_acc, obstacle_radius and obstacle_delta_H are filled. Subclasses override this, so that the public solve() and
      * computedCostrainedSolution() are never hidden.
      * @throws std::runtime_error if the problem is infeasible.
      */
     virtual void doSolve( const ThorInput& in, ThorOutput& out );
 
-    /// @brief Legacy return value: `{h_min, interval, frame_id, distance, v_rel, vh_proj}`.
+    /// @brief Legacy return value: `{h_min, interval, frame_id, distance, v_robot, v_obstacle}`.
     static std::vector<double> toLegacyDiagnostics( const CbfDiagnostics& cbf );
     /// @cond THOR_INTERNAL
     int id = 0;
@@ -531,8 +541,9 @@ class ThorQP
         m_model = other.m_model;
         m_data = other.m_data;
         m_frameIds = other.m_frameIds;
+        m_frame_radii = other.m_frame_radii;
         m_h = other.m_h;
-        m_num_ph = other.m_num_ph;
+        m_n_obstacle_points = other.m_n_obstacle_points;
 
       }
       return *this;
@@ -646,8 +657,9 @@ class ThorQP
     [[deprecated("set the ThorConfig lambda_* fields and call configure()")]]
     void setWeigthFunction( const double& lambda_acc, const double& lambda_tau, const double& lambda_jerk, const double& lambda_scaling, const double& lambda_clik );
 
-    /// @deprecated Use ThorConfig::cbf_frame_ids, n_human_points and configure().
-    [[deprecated("set ThorConfig::cbf_frame_ids and n_human_points and call configure()")]]
+    /// @deprecated Use ThorConfig::cbf_frame_ids, n_obstacle_points and configure().
+    /// The robot spheres get zero radius.
+    [[deprecated("set ThorConfig::cbf_frame_ids and n_obstacle_points and call configure()")]]
     void setCbfIds(const std::vector<unsigned int>& frameIds, const int& num_ph);
     /// @}
 
@@ -683,8 +695,9 @@ class ThorQP
                                     );
     /**
      * @deprecated Use solve().
-     * @return `{h_min, interval, frame_id, distance, v_rel, vh_proj}`
-     *         (see CbfDiagnostics). Note the order: velocities, then positions.
+     * @return `{h_min, interval, frame_id, distance, v_robot, v_obstacle}`
+     *         (see CbfDiagnostics). Note the order of the obstacle arguments:
+     *         velocities, then positions.
      */
     [[deprecated("use solve()")]]
     std::vector<double> computedCostrainedSolution(  const Eigen::VectorXd& targetDq,
@@ -693,10 +706,10 @@ class ThorQP
                                         const Eigen::VectorXd& x0,
                                         Eigen::VectorXd& next_acc,
                                         double& next_scaling,
-                                        const std::vector<Eigen::Vector3d> &v_h_vector,
-                                        const std::vector<Eigen::Vector3d> &p_h_vector
+                                        const std::vector<Eigen::Vector3d> &v_o_vector,
+                                        const std::vector<Eigen::Vector3d> &p_o_vector
     );
-    /// @deprecated Use solve(). Same as above with no human data (far-away humans).
+    /// @deprecated Use solve(). Same as above with no obstacle data (far-away obstacles).
     [[deprecated("use solve()")]]
     std::vector<double> computedCostrainedSolution(  const Eigen::VectorXd& targetDq,
                                         const Eigen::VectorXd& next_targetQ,
@@ -730,8 +743,11 @@ class ThorQP
     Eigen::VectorXd getFirstPredictionVel();
     /// @brief Control period [s].
     double getDt(){return m_dt;};
-    /// @brief Number of human points (ThorConfig::n_human_points).
-    double getNumPh(){return m_num_ph;};
+    /// @brief Number of obstacle points (ThorConfig::n_obstacle_points).
+    unsigned int getNumObstaclePoints() const {return static_cast<unsigned int>(m_n_obstacle_points);};
+    /// @deprecated Use getNumObstaclePoints().
+    [[deprecated("use getNumObstaclePoints()")]]
+    double getNumPh(){return m_n_obstacle_points;};
 };
 
 }  // namespace math

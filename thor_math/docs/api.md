@@ -2,8 +2,10 @@
 
 `thor_math` provides `thor::math::ThorQP`, a model predictive controller (MPC)
 for robot manipulators. It scales the speed of a nominal joint trajectory and,
-optionally, keeps a safe distance from people through a control barrier
-function (CBF).
+optionally, keeps a safe distance from dynamic obstacles through a control
+barrier function (CBF). Obstacles are spheres with position, velocity and
+acceleration: people (e.g. skeleton keypoints), vehicles, other robots and
+static fixtures are handled the same way.
 
 | Header | Content |
 | --- | --- |
@@ -54,8 +56,9 @@ config.T_r   = 0.15;
 config.C     = 0.10;
 config.gamma = 5.0;
 config.delta_H = thor::math::cbf::perceptionMargin(3.291, 0.015, 0.072, 0.196, 0.3);
-config.cbf_frame_ids  = {static_cast<unsigned int>(model.getFrameId("tool0"))};
-config.n_human_points = 1;
+config.cbf_frame_ids     = {static_cast<unsigned int>(model.getFrameId("tool0"))};
+config.cbf_frame_radii   = {0.05};          // robot sphere around tool0
+config.n_obstacle_points = 1;
 
 thor::math::ThorQP qp(config, model);      // throws std::invalid_argument on bad config
 qp.setInitialState(x0);                    // x0 = [q; dq]
@@ -69,9 +72,10 @@ for (;;) {
   for (unsigned int i = 0; i < config.n_intervals; ++i)
     in.target_dq.segment(i * n, n) = nominal_velocity(tau + s * t(i));
   in.next_target_q = nominal_position(tau + s * t(0));
-  in.human_pos = {p_h};
-  in.human_vel = {v_h};
-  in.human_acc = {a_h};                    // optional
+  in.obstacle_pos    = {p_o};
+  in.obstacle_vel    = {v_o};
+  in.obstacle_acc    = {a_o};              // optional
+  in.obstacle_radius = {0.2};              // optional: obstacle sphere radius
 
   try {
     const thor::math::ThorOutput out = qp.solve(in);
@@ -171,35 +175,41 @@ For every interval `i`:
 | `-Dqmax <= dq(t_i) <= Dqmax` | always |
 | `qmin <= q(t_i) <= qmax` | `position_bounds` |
 | `K (q(t_i) - qmin) + dq(t_i) >= 0`, `K (qmax - q(t_i)) - dq(t_i) >= 0`, with `K = 0.99 DDqmax / Dqmax` | `position_bounds` |
-| CBF, one row per (interval, frame, human point) | `cbf` |
+| CBF, one row per (interval, robot sphere, obstacle sphere) | `cbf` |
 
 The invariance rows limit the velocity towards a position limit, so that the
 robot can always stop before reaching it.
 
 ### 2.6 Control barrier function
 
-For each monitored robot frame (`cbf_frame_ids`) and human point:
+The robot is covered by spheres centered at `cbf_frame_ids`, with radii
+`cbf_frame_radii`. Each obstacle point `k` is a sphere centered at
+`obstacle_pos[k]`, with radius `obstacle_radius[k]` and distance estimation
+error `delta_H_k` (`obstacle_delta_H[k]`, or `ThorConfig::delta_H`). For
+every robot sphere `j` and obstacle sphere `k`:
 
-- **Barrier.** `h = d_min - C`, where `d_min` is the minimum distance reached
-  if the robot reacts after `T_r` and then brakes at `a_s`, while the person
-  keeps its acceleration (section 5). The safe set is `h >= 0`.
+- **Distance.** The barrier uses the worst-case distance between the
+  surfaces, `d = |p_r - p_o| - r_j - r_k - delta_H_k`. The perception error
+  inflates the obstacle sphere.
+- **Barrier.** `h = d_min - C`, where `d_min` is the minimum of that distance
+  if the robot reacts after `T_r` and then brakes at `a_s`, while the
+  obstacle keeps its acceleration (section 5). `C` is the safety margin
+  between the surfaces. The safe set is `h >= 0`.
 - **Condition.** Imposed at the start of interval `i`:
 
   ```
-  L_g h (J u_i + dJ dq) + L_f h + gamma (h - h_chi delta_H) >= 0
+  L_g h (J u_i + dJ dq) + L_f h + gamma h >= 0
   ```
 
-  - `L_f h` and `L_g h` are the Lie derivatives of `h` (`cbf::barrierTerms()`);
-    `J u_i + dJ dq` is the acceleration of the frame.
-  - `h_chi = dh/dd`. Since the true distance is at least `d - delta_H`, the
-    condition keeps `h - h_chi delta_H >= 0`: the barrier is non-negative
-    even for the worst-case distance.
+  `L_f h` and `L_g h` are the Lie derivatives of `h` (`cbf::barrierTerms()`);
+  `J u_i + dJ dq` is the acceleration of the frame. Radii and `delta_H` are
+  constant, so the Lie derivatives are the same as for points.
 - **Robot state per interval.** For `i = 0` it is the current state `x0`. For
   `i > 0` it is the state at `t_{i-1}` of the previous prediction, which
   `solve()` stores. With `n_intervals = 1` the constraint is the one-step
   controller of the paper.
-- **Human prediction.** The human points are extrapolated to the start of
-  each interval with constant acceleration.
+- **Obstacle prediction.** The obstacle centers are extrapolated to the start
+  of each interval with constant acceleration.
 - **Activation distance.** If the lowest `h` over the horizon is above
   `cbf_activation_distance`, the CBF rows are dropped from the QP: the
   solution is the same, and the QP is smaller.
@@ -233,7 +243,7 @@ ThorQP()  ──setPinocchioModel()──>  configure(config)  ──>  setIniti
      real system, pass the measured state as `in.x0` instead.
 
 **Infeasibility.** `solve()` throws `std::runtime_error` when no command
-satisfies all constraints, e.g. a person moving faster than the robot can
+satisfies all constraints, e.g. an obstacle moving faster than the robot can
 react. The controller must then apply a safe command itself. For example,
 brake within the limits, `acc = clamp(-dq / dt, -DDqmax, DDqmax)`, and freeze
 the trajectory time.
@@ -245,7 +255,7 @@ and the last solution.
 
 **Cost per cycle.** It grows with
 `n_intervals * (n_joints + 1)` variables and with
-`n_intervals * frames * human points` CBF rows; there is one kinematics
+`n_intervals * robot spheres * obstacle spheres` CBF rows; there is one kinematics
 evaluation per interval. With 6 joints, 5 intervals, 5 frames and 2 points,
 a solve takes about 50–150 µs in Release builds (see the example).
 
@@ -280,10 +290,11 @@ Settings applied by `ThorQP::configure()`. Vectors have size `n_joints`.
 | `T_r` | 0 | reaction time [s] | >= 0 (CBF) |
 | `C` | 0 | safety margin [m] | > 0 (CBF) |
 | `gamma` | 0 | CBF gain [1/s] | |
-| `delta_H` | 0 | distance estimation error [m] | >= 0 (CBF) |
+| `delta_H` | 0 | default distance estimation error [m], inflates every obstacle sphere | >= 0 (CBF) |
 | `cbf_activation_distance` | 5.0 | drop the CBF rows above this `h` [m] | |
 | `cbf_frame_ids` | empty | Pinocchio frame ids of the robot points | < `model.frames.size()` |
-| `n_human_points` | 0 | human points per cycle | >= 0 |
+| `cbf_frame_radii` | empty | radius of each robot sphere [m]; empty means points | empty or size of `cbf_frame_ids`; >= 0 |
+| `n_obstacle_points` | 0 | obstacle spheres per cycle | >= 0 |
 
 ### 4.2 `struct ThorInput`
 
@@ -293,13 +304,16 @@ Settings applied by `ThorQP::configure()`. Vectors have size `n_joints`.
 | `next_target_q` | `n_joints` | target position at `t_0` |
 | `target_scaling` | – | desired time scaling (default 1) |
 | `x0` | `2*n_joints` | current state `[q; dq]` |
-| `human_pos` | ≥ `n_human_points` | human point positions [m], world frame |
-| `human_vel` | same as `human_pos` | velocities [m/s] |
-| `human_acc` | empty or same | accelerations [m/s²]; empty means zero |
+| `obstacle_pos` | ≥ `n_obstacle_points` | obstacle sphere centers [m], world frame |
+| `obstacle_vel` | same as `obstacle_pos` | velocities [m/s] |
+| `obstacle_acc` | empty or same | accelerations [m/s²]; empty means zero |
+| `obstacle_radius` | empty or same | sphere radii [m] (>= 0); empty means points |
+| `obstacle_delta_H` | empty or same | distance estimation error of each sphere [m] (>= 0); empty means `ThorConfig::delta_H` |
 
-With the CBF disabled, the human fields are ignored. With the CBF enabled and
-all three vectors empty, `n_human_points` still points at `(100, 100, 100)`
-are used (nobody around). Only the first `n_human_points` points are used.
+With the CBF disabled, the obstacle fields are ignored. With the CBF enabled
+and `obstacle_pos`, `obstacle_vel` and `obstacle_acc` all empty,
+`n_obstacle_points` still points at `(100, 100, 100)` are used (nothing
+around). Only the first `n_obstacle_points` spheres are used.
 
 ### 4.3 `struct ThorOutput`
 
@@ -311,8 +325,10 @@ are used (nobody around). Only the first `n_human_points` points are used.
 
 ### 4.4 `struct CbfDiagnostics`
 
-The robot-human pair with the lowest `h` over the horizon. All fields are 0
-with the CBF disabled.
+The robot-obstacle pair with the lowest `h` over the horizon. All fields are 0
+with the CBF disabled. For intervals after the first, `h` is computed on the
+previous prediction, so `h_min` can be briefly negative even when the actual
+motion is safe.
 
 | Field | Meaning |
 | --- | --- |
@@ -320,9 +336,9 @@ with the CBF disabled.
 | `interval` | control interval |
 | `frame_id` | Pinocchio frame id (`model.frames[frame_id].name`) |
 | `distance` | distance `d` [m] |
-| `v_rel` | robot velocity along `(p_r - p_h)/d` [m/s], negative when approaching |
-| `vh_proj` | human velocity along the same direction, positive when approaching |
-| `human_index` | index in `ThorInput::human_pos` |
+| `v_robot` | robot velocity along `(p_r - p_o)/\|p_r - p_o\|` [m/s], negative when approaching |
+| `v_obstacle` | obstacle velocity along the same direction, positive when approaching |
+| `obstacle_index` | index in `ThorInput::obstacle_pos` |
 
 ### 4.5 `class ThorQP`
 
@@ -339,7 +355,7 @@ with the CBF disabled.
 | `Eigen::VectorXd getPredictionTimeInstant()` | prediction times `t_i` |
 | `Eigen::VectorXd getFirstPredictionPos()` / `Vel()` | predicted `q(t_0)`, `dq(t_0)` |
 | `double getDt()` | control period |
-| `double getNumPh()` | `n_human_points` |
+| `unsigned int getNumObstaclePoints() const` | `n_obstacle_points` (`getNumPh()` is deprecated) |
 | `bool needUpdate()` | settings changed, matrices must be rebuilt |
 | `bool arePositionBoundsActive()` | `position_bounds` |
 | `virtual void updateMatrices()` | rebuild the constant matrices (needed only after legacy setters) |
@@ -374,19 +390,20 @@ useful on their own. The state of `nax` joints is `[q; dq]`.
 
 ## 5. Reference: cbf.h
 
-Namespace `thor::math::cbf`. For a robot point `p_r` and a human point `p_h`,
-`d = |p_r - p_h|` and `u = (p_r - p_h)/d`. The barrier depends on
-`psi = [d, v_r, v_h, a_h]`, the distance and the robot velocity, human
-velocity and human acceleration projected on `u`. A negative `v_r` and a
-positive `v_h` mean approaching.
+Namespace `thor::math::cbf`. For a robot sphere centered at `p_r` and an
+obstacle sphere centered at `p_o`, `u = (p_r - p_o)/|p_r - p_o|` and `d` is
+the distance between the surfaces. The barrier depends on
+`psi = [d, v_r, v_o, a_o]`, the distance and the robot velocity, obstacle
+velocity and obstacle acceleration projected on `u`. A negative `v_r` and a
+positive `v_o` mean approaching.
 
-### `double minimumDistance(d, v_r, v_h, a_h, T_r, a_s, atol, Eigen::Vector4d& jacobian)`
+### `double minimumDistance(d, v_r, v_o, a_o, T_r, a_s, atol, Eigen::Vector4d& jacobian)`
 
 The minimum of the distance while the robot keeps its velocity for `T_r` and
-then brakes at `a_s` until it stops, and the human keeps `a_h`:
+then brakes at `a_s` until it stops, and the obstacle keeps `a_o`:
 
 ```
-d(t) = d + (v_r - v_h) t - a_h t²/2 + [t > T_r] a_s (t - T_r)²/2
+d(t) = d + (v_r - v_o) t - a_o t²/2 + [t > T_r] a_s (t - T_r)²/2
 ```
 
 The candidates are:
@@ -400,21 +417,25 @@ The candidates are:
 stop time on `v_r`. The result can be negative, which means a contact is
 unavoidable. Throws `std::invalid_argument` if `a_s <= 0`.
 
-### `double barrier(d, v_r, v_h, a_h, T_r, a_s, C, atol, Eigen::Vector4d& jacobian)`
+### `double barrier(d, v_r, v_o, a_o, T_r, a_s, C, atol, Eigen::Vector4d& jacobian)`
 
 `h = d_min - C`. If `d_min < C`, `h += (C - d_min)/C · T_r · v_r`, so that
 inside the margin a receding robot raises `h` and can escape. `jacobian` is
 `∂h/∂psi`.
 
-### `BarrierTerms barrierTerms(p_r, v_r, p_h, v_h, a_h, T_r, a_s, C, atol = 1e-12)`
+### `BarrierTerms barrierTerms(p_r, v_r, p_o, v_o, a_o, T_r, a_s, C, radius = 0, atol = 1e-12)`
 
-Returns `h`, `lie_f`, `lie_g`, `h_chi`, `d`, `v_r`, `v_h` and `a_h`.
+Returns `h`, `lie_f`, `lie_g`, `h_chi`, `d`, `v_r`, `v_o` and `a_o`.
 
+- **Spheres.** `radius` is the sum of the radii (plus `delta_H` for the
+  worst-case distance): `d = |p_r - p_o| - radius`, negative if the spheres
+  overlap.
 - **Lie derivatives.** Along the motion, `dh/dt = lie_f + lie_g · a_r`, where
-  `a_r` is the robot point acceleration. They account for the rotation of
-  `u`, `du/dt = (I - u uᵀ)(v_r - v_h)/d`, and for the human acceleration.
+  `a_r` is the robot center acceleration. They account for the rotation of
+  `u`, `du/dt = (I - u uᵀ)(v_r - v_o)/|p_r - p_o|`, and for the obstacle
+  acceleration.
 - **`h_chi`.** `h_chi = ∂h/∂d`: it is 1 outside the margin and larger inside.
-- **Coincident points.** If `d <= atol`, `u` is the x axis.
+- **Coincident centers.** If `|p_r - p_o| <= atol`, `u` is the x axis.
 
 ### `double perceptionMargin(beta, sigma_p, sigma_v, sigma_a, T_f_bar)`
 
@@ -422,7 +443,8 @@ Returns `h`, `lie_f`, `lie_g`, `h_chi`, `d`, `v_r`, `v_h` and `a_h`.
 It is the distance error accumulated over the stopping time `T_f_bar` by
 noisy position, velocity and acceleration estimates. `beta = 3.291` gives
 99.9% confidence for Gaussian noise. Pass the result as
-`ThorConfig::delta_H`.
+`ThorConfig::delta_H` or `ThorInput::obstacle_delta_H`: the barrier is then
+evaluated at the worst-case distance `d - delta_H`.
 
 ---
 
@@ -451,14 +473,15 @@ validation and need a manual `updateMatrices()`.
 | `activatePositionBounds(b)` | `position_bounds` |
 | `activateCbfBounds(b)` | `cbf` |
 | `setCBFParameters(a_s, T_r, C, gamma)` | `a_s`, `T_r`, `C`, `gamma` (+ `delta_H`) |
-| `setCbfIds(ids, n)` | `cbf_frame_ids`, `n_human_points` |
+| `setCbfIds(ids, n)` | `cbf_frame_ids`, `n_obstacle_points` (+ `cbf_frame_radii`) |
 | `activateTorqueBounds(b)` | none (not implemented) |
 | `activateCbfMoveAway(b)` | none (handled by `d_min`) |
 | `updateMatrices()` | `configure(config)` |
-| `computedCostrainedSolution(dq, q, s, x0, acc, scaling, v_h, p_h)` | `solve({dq, q, s, x0, p_h, v_h, a_h})` — note the order of positions and velocities |
+| `computedCostrainedSolution(dq, q, s, x0, acc, scaling, v_o, p_o)` | `solve({dq, q, s, x0, p_o, v_o, a_o, radius, delta_H})` — note the order of positions and velocities |
+| `getNumPh()` | `getNumObstaclePoints()` |
 
-The legacy result vector `{h_min, interval, frame_id, distance, v_rel,
-vh_proj}` corresponds to the fields of `ThorOutput::cbf`.
+The legacy result vector `{h_min, interval, frame_id, distance, v_robot,
+v_obstacle}` corresponds to the fields of `ThorOutput::cbf`.
 
 ---
 
@@ -472,10 +495,22 @@ The kernels in `cbf.h` reproduce its values to 1e-12. The differences are:
   acceleration of the time scaling as input. `ThorQP` keeps its multi-interval
   MPC with the time scaling as a decision variable. It imposes the CBF on every
   interval; with `n_intervals = 1`, the CBF row is the same.
-- **Sign of the robust term.** The paper and `cbf_python` add `+ h_chi delta_H`,
-  which relaxes the constraint and adds metres to metres per second. `ThorQP`
-  uses `gamma (h - h_chi delta_H)`, the condition on the worst-case barrier.
-  With `delta_H = 0` the two coincide.
+- **Robust term.** The paper and `cbf_python` add `+ h_chi delta_H` to the
+  condition, which relaxes it and adds metres to metres per second. `ThorQP`
+  evaluates the barrier at the worst-case distance `d - delta_H` (the obstacle
+  sphere is inflated by `delta_H`).
+
+  The first-order version of the same idea, `gamma (h - h_chi delta_H)`, is
+  not used. It moves the boundary of the safe set away from `d_min = C`, where
+  the escape term of the barrier gives the robot control authority. A robot
+  stopped on that boundary would then make the QP infeasible forever.
+
+  With `delta_H = 0` all three forms coincide. The deadlock and its fix are
+  described in [robust_margin_deadlock.md](robust_margin_deadlock.md).
+- **Obstacles, not only people, and spheres, not only points.** The paper
+  monitors points of a person with one margin `C`. `ThorQP` takes any obstacle
+  spheres, with a radius per robot frame and per obstacle and a `delta_H` per
+  obstacle; `C` is the margin between the surfaces.
 - **Supervisory logic not included.** The trajectory tube, the missed-deadline
   handling, the fallback braking and the tube recovery of `cbf_python` are left
   to the caller. The example shows the fallback braking.

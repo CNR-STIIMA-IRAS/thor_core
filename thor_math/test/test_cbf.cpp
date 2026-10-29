@@ -14,7 +14,7 @@ constexpr double kAs = 2.5;
 constexpr double kC = 0.1;
 constexpr double kAtol = 1e-12;
 
-using Psi = std::array<double, 4>;  // {d, v_r, v_h, a_h}
+using Psi = std::array<double, 4>;  // {d, v_r, v_o, a_o}
 
 Eigen::Vector4d numericJacobian(const std::function<double(const Psi&)>& f, const Psi& psi)
 {
@@ -47,7 +47,7 @@ TEST(CbfMinimumDistance, ApproachingRobotBrakesToStop)
   Eigen::Vector4d jac;
   const double value = minimumDistance(1.0, -0.5, 0.3, 0.0, kTr, kAs, kAtol, jac);
   EXPECT_NEAR(value, 0.77, 1e-12);
-  // d(d_min)/dv_r = T_r - (v_r - v_h)/a_s
+  // d(d_min)/dv_r = T_r - (v_r - v_o)/a_s
   EXPECT_TRUE(jac.isApprox(Eigen::Vector4d(1.0, 0.47, -0.35, -0.5 * 0.35 * 0.35), 1e-12));
 }
 
@@ -57,7 +57,7 @@ TEST(CbfMinimumDistance, RecedingRobotKeepsCurrentDistance)
   EXPECT_DOUBLE_EQ(minimumDistance(1.0, 0.4, 0.3, 0.0, kTr, kAs, kAtol, jac), 1.0);
   EXPECT_TRUE(jac.isApprox(Eigen::Vector4d(1.0, 0.0, 0.0, 0.0)));
 
-  // Faster human: the minimum is at the end of the reaction time.
+  // Faster obstacle: the minimum is at the end of the reaction time.
   EXPECT_NEAR(minimumDistance(1.0, 0.1, 0.5, 0.0, kTr, kAs, kAtol, jac), 0.94, 1e-12);
   EXPECT_TRUE(jac.isApprox(Eigen::Vector4d(1.0, kTr, -kTr, -0.5 * kTr * kTr), 1e-12));
 }
@@ -72,7 +72,7 @@ TEST(CbfMinimumDistance, JacobianMatchesFiniteDifferences)
 {
   const std::array<Psi, 7> cases = {{
     {1.0, -0.5, 0.3, 0.0},   // braking, minimum at t4
-    {1.0, -0.5, 0.3, 1.2},   // human accelerating
+    {1.0, -0.5, 0.3, 1.2},   // obstacle accelerating
     {1.0, 0.4, 0.3, -2.0},   // receding, minimum at t0
     {1.0, 0.1, 0.2, -1.0},   // interior minimum t1 during the reaction
     {1.0, -2.0, -1.5, 0.0},  // interior minimum t3 during braking
@@ -102,14 +102,14 @@ TEST(CbfBarrier, AddsRecedingTermInsideTheMargin)
               d - kC + (kC - d) / kC * kTr * v_r, 1e-12);
 }
 
-TEST(CbfBarrierTerms, ProjectsTheStateOnTheRobotHumanDirection)
+TEST(CbfBarrierTerms, ProjectsTheStateOnTheRobotObstacleDirection)
 {
   const BarrierTerms b = barrierTerms(Eigen::Vector3d(1.0, 0.0, 0.0), Eigen::Vector3d(-0.5, 0.2, 0.0),
                                       Eigen::Vector3d::Zero(), Eigen::Vector3d(0.3, 0.0, 0.1),
                                       Eigen::Vector3d::Zero(), kTr, kAs, kC);
   EXPECT_DOUBLE_EQ(b.d, 1.0);
   EXPECT_DOUBLE_EQ(b.v_r, -0.5);
-  EXPECT_DOUBLE_EQ(b.v_h, 0.3);
+  EXPECT_DOUBLE_EQ(b.v_o, 0.3);
   EXPECT_NEAR(b.h, 0.77 - kC, 1e-12);
   EXPECT_DOUBLE_EQ(b.h_chi, 1.0);
   EXPECT_TRUE(b.lie_g.isApprox(Eigen::Vector3d(0.47, 0.0, 0.0), 1e-12));
@@ -118,33 +118,70 @@ TEST(CbfBarrierTerms, ProjectsTheStateOnTheRobotHumanDirection)
 // dh/dt along the closed-loop motion must equal L_f h + L_g h * a_r.
 TEST(CbfBarrierTerms, LieDerivativesMatchTimeDerivative)
 {
-  struct Case { Eigen::Vector3d p_r, v_r, a_r, p_h, v_h, a_h; };
+  struct Case { Eigen::Vector3d p_r, v_r, a_r, p_o, v_o, a_o; };
   const std::array<Case, 4> cases = {{
     {{0.5, 0.2, 0.8}, {-0.3, 0.1, 0.05}, {1.0, -2.0, 0.5}, {1.2, 0.0, 0.9}, {-0.4, 0.2, 0.0}, {0.0, 0.0, 0.0}},
     {{0.5, 0.2, 0.8}, {-0.3, 0.1, 0.05}, {1.0, -2.0, 0.5}, {1.2, 0.0, 0.9}, {-0.4, 0.2, 0.0}, {0.5, -1.0, 0.2}},
     {{0.3, -0.1, 0.5}, {0.2, 0.3, 0.0}, {-3.0, 0.0, 1.0}, {0.4, 0.0, 0.5}, {0.1, 0.0, 0.0}, {0.0, 0.0, 0.0}},
     {{0.0, 0.0, 1.0}, {0.8, 0.0, -0.6}, {0.0, 4.0, 0.0}, {1.0, 0.5, 0.2}, {-1.0, -0.2, 0.3}, {0.3, 0.0, -0.4}},
   }};
-  for (std::size_t index = 0; index < cases.size(); ++index) {
-    SCOPED_TRACE(index);
-    const Case& c = cases[index];
-    auto h_at = [&](double t) {
-      return barrierTerms(c.p_r + c.v_r * t + 0.5 * c.a_r * t * t, c.v_r + c.a_r * t,
-                          c.p_h + c.v_h * t + 0.5 * c.a_h * t * t, c.v_h + c.a_h * t, c.a_h,
-                          kTr, kAs, kC).h;
-    };
-    constexpr double dt = 1e-6;
-    const double numeric = (h_at(dt) - h_at(-dt)) / (2.0 * dt);
-    const BarrierTerms b = barrierTerms(c.p_r, c.v_r, c.p_h, c.v_h, c.a_h, kTr, kAs, kC);
-    EXPECT_NEAR(b.lie_f + b.lie_g.dot(c.a_r), numeric, 1e-6);
+  // Spheres too: the radii are constant, so the Lie derivatives stay exact.
+  for (const double radius : {0.0, 0.05, 0.2}) {
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+      SCOPED_TRACE(::testing::Message() << "radius " << radius << " case " << index);
+      const Case& c = cases[index];
+      auto h_at = [&](double t) {
+        return barrierTerms(c.p_r + c.v_r * t + 0.5 * c.a_r * t * t, c.v_r + c.a_r * t,
+                            c.p_o + c.v_o * t + 0.5 * c.a_o * t * t, c.v_o + c.a_o * t, c.a_o,
+                            kTr, kAs, kC, radius).h;
+      };
+      constexpr double dt = 1e-6;
+      const double numeric = (h_at(dt) - h_at(-dt)) / (2.0 * dt);
+      const BarrierTerms b = barrierTerms(c.p_r, c.v_r, c.p_o, c.v_o, c.a_o, kTr, kAs, kC, radius);
+      EXPECT_NEAR(b.lie_f + b.lie_g.dot(c.a_r), numeric, 1e-6);
+    }
   }
+}
+
+// Spheres: the barrier sees the distance between the surfaces, while the
+// projection direction is still the one between the centers.
+TEST(CbfBarrierTerms, SphereRadiusShiftsTheDistance)
+{
+  const Eigen::Vector3d p_r(1.0, 0.0, 0.0), v_r(-0.5, 0.2, 0.0);
+  const Eigen::Vector3d p_o = Eigen::Vector3d::Zero(), v_o(0.3, 0.0, 0.1);
+  const double radius = 0.25;
+  const BarrierTerms sphere = barrierTerms(p_r, v_r, p_o, v_o, Eigen::Vector3d::Zero(),
+                                           kTr, kAs, kC, radius);
+  EXPECT_DOUBLE_EQ(sphere.d, 1.0 - radius);
+  EXPECT_DOUBLE_EQ(sphere.v_r, -0.5);
+  EXPECT_DOUBLE_EQ(sphere.v_o, 0.3);
+
+  Eigen::Vector4d jac;
+  EXPECT_NEAR(sphere.h, barrier(1.0 - radius, -0.5, 0.3, 0.0, kTr, kAs, kC, kAtol, jac), 1e-12);
+  EXPECT_DOUBLE_EQ(sphere.h_chi, jac(0));
+  EXPECT_TRUE(sphere.lie_g.isApprox(jac(1) * Eigen::Vector3d::UnitX(), 1e-12));
+
+  // Same pair as points: the radius lowers h by exactly the radius when
+  // d_min stays above the margin.
+  const BarrierTerms point = barrierTerms(p_r, v_r, p_o, v_o, Eigen::Vector3d::Zero(), kTr, kAs, kC);
+  EXPECT_NEAR(point.h - sphere.h, radius, 1e-12);
+  EXPECT_NEAR(point.lie_f, sphere.lie_f, 1e-12);
+}
+
+TEST(CbfBarrierTerms, OverlappingSpheresGiveNegativeDistance)
+{
+  const BarrierTerms b = barrierTerms(Eigen::Vector3d(0.1, 0.0, 0.0), Eigen::Vector3d::Zero(),
+                                      Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                                      Eigen::Vector3d::Zero(), kTr, kAs, kC, 0.3);
+  EXPECT_NEAR(b.d, -0.2, 1e-12);
+  EXPECT_LT(b.h, 0.0);
 }
 
 // Reference values printed by cbf_python/controllers/kernels/ssm_cbf_acc.py
 // (branch dynamic_parameters) with T_r = 0.15, a_s = 2.5, C = 0.1.
 TEST(CbfPythonReference, MinimumDistanceAndBarrier)
 {
-  struct Row { double d, v_r, v_h, a_h, d_min; Psi jac_dmin; double h; Psi jac_h; };
+  struct Row { double d, v_r, v_o, a_o, d_min; Psi jac_dmin; double h; Psi jac_h; };
   const std::array<Row, 10> rows = {{
     {1.0, -0.5, 0.3, 0.0, 0.77, {1.0, 0.47, -0.35, -0.06124999999999999}, 0.67, {1.0, 0.47, -0.35, -0.06124999999999999}},
     {1.0, -0.5, 0.3, 1.2, 0.6964999999999999, {1.0, 0.638, -0.35, -0.06124999999999999}, 0.5964999999999999, {1.0, 0.638, -0.35, -0.06124999999999999}},
@@ -161,10 +198,10 @@ TEST(CbfPythonReference, MinimumDistanceAndBarrier)
     SCOPED_TRACE(index);
     const Row& r = rows[index];
     Eigen::Vector4d jac;
-    EXPECT_NEAR(minimumDistance(r.d, r.v_r, r.v_h, r.a_h, kTr, kAs, kAtol, jac), r.d_min, 1e-12);
+    EXPECT_NEAR(minimumDistance(r.d, r.v_r, r.v_o, r.a_o, kTr, kAs, kAtol, jac), r.d_min, 1e-12);
     for (Eigen::Index i = 0; i < 4; ++i)
       EXPECT_NEAR(jac(i), r.jac_dmin[static_cast<std::size_t>(i)], 1e-12);
-    EXPECT_NEAR(barrier(r.d, r.v_r, r.v_h, r.a_h, kTr, kAs, kC, kAtol, jac), r.h, 1e-12);
+    EXPECT_NEAR(barrier(r.d, r.v_r, r.v_o, r.a_o, kTr, kAs, kC, kAtol, jac), r.h, 1e-12);
     for (Eigen::Index i = 0; i < 4; ++i)
       EXPECT_NEAR(jac(i), r.jac_h[static_cast<std::size_t>(i)], 1e-12);
   }
@@ -174,10 +211,10 @@ TEST(CbfPythonReference, BarrierTerms)
 {
   struct Row
   {
-    Eigen::Vector3d p_r, v_r, p_h, v_h, a_h;
+    Eigen::Vector3d p_r, v_r, p_o, v_o, a_o;
     double h, lie_f;
     Eigen::Vector3d lie_g;
-    double h_chi, d, vr, vh;
+    double h_chi, d, vr, vo;
   };
   const std::array<Row, 5> rows = {{
     {{0.5, 0.2, 0.8}, {-0.3, 0.1, 0.05}, {1.2, 0.0, 0.9}, {-0.4, 0.2, 0.0}, {0.0, 0.0, 0.0}, 0.6154551290379199, -0.12809735132494596, {-0.14288690166235204, 0.04082482904638631, -0.020412414523193145}, 1.0, 0.7348469228349533, 0.3061862178478973, 0.43546484316145395},
@@ -189,14 +226,14 @@ TEST(CbfPythonReference, BarrierTerms)
   for (std::size_t index = 0; index < rows.size(); ++index) {
     SCOPED_TRACE(index);
     const Row& r = rows[index];
-    const BarrierTerms b = barrierTerms(r.p_r, r.v_r, r.p_h, r.v_h, r.a_h, kTr, kAs, kC);
+    const BarrierTerms b = barrierTerms(r.p_r, r.v_r, r.p_o, r.v_o, r.a_o, kTr, kAs, kC);
     EXPECT_NEAR(b.h, r.h, 1e-12);
     EXPECT_NEAR(b.lie_f, r.lie_f, 1e-12);
     EXPECT_TRUE(b.lie_g.isApprox(r.lie_g, 1e-12)) << b.lie_g.transpose();
     EXPECT_NEAR(b.h_chi, r.h_chi, 1e-12);
     EXPECT_NEAR(b.d, r.d, 1e-12);
     EXPECT_NEAR(b.v_r, r.vr, 1e-12);
-    EXPECT_NEAR(b.v_h, r.vh, 1e-12);
+    EXPECT_NEAR(b.v_o, r.vo, 1e-12);
   }
 }
 

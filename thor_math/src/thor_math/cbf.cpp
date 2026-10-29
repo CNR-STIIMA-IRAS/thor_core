@@ -12,7 +12,7 @@ namespace math
 namespace cbf
 {
 
-  double minimumDistance ( double d, double v_r, double v_h, double a_h,
+  double minimumDistance ( double d, double v_r, double v_o, double a_o,
                            double T_r, double a_s, double atol,
                            Eigen::Vector4d& jacobian )
   {
@@ -24,15 +24,15 @@ namespace cbf
     const double t2 = T_r;
     const double t_dec = std::max(0.0, -v_r / a_s);
     const double t4 = t2 + t_dec;
-    const double m = a_h - a_s;
-    const double v_diff = v_r - v_h;
+    const double m = a_o - a_s;
+    const double v_diff = v_r - v_o;
 
     // Stationary points of the distance inside each phase.
     bool has_t1 = false;
     double t1 = 0.0;
-    if (std::abs(a_h) > atol)
+    if (std::abs(a_o) > atol)
     {
-      const double t = v_diff / a_h;
+      const double t = v_diff / a_o;
       if (t0 + atol < t && t < t2 - atol)
       {
         t1 = t;
@@ -76,7 +76,7 @@ namespace cbf
 
     auto distance_at = [&](double t)
     {
-      double value = d + v_diff * t - 0.5 * a_h * t * t;
+      double value = d + v_diff * t - 0.5 * a_o * t * t;
       if (t > t2 + atol)
         value += 0.5 * a_s * (t - t2) * (t - t2);
       return value;
@@ -107,12 +107,12 @@ namespace cbf
     return d_min;
   }
 
-  double barrier ( double d, double v_r, double v_h, double a_h,
+  double barrier ( double d, double v_r, double v_o, double a_o,
                    double T_r, double a_s, double C, double atol,
                    Eigen::Vector4d& jacobian )
   {
     Eigen::Vector4d dist_jac;
-    const double d_min = minimumDistance(d, v_r, v_h, a_h, T_r, a_s, atol, dist_jac);
+    const double d_min = minimumDistance(d, v_r, v_o, a_o, T_r, a_s, atol, dist_jac);
 
     double h = d_min - C;
     jacobian = dist_jac;
@@ -128,41 +128,43 @@ namespace cbf
   }
 
   BarrierTerms barrierTerms ( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r,
-                              const Eigen::Vector3d& p_h, const Eigen::Vector3d& v_h,
-                              const Eigen::Vector3d& a_h,
-                              double T_r, double a_s, double C, double atol )
+                              const Eigen::Vector3d& p_o, const Eigen::Vector3d& v_o,
+                              const Eigen::Vector3d& a_o,
+                              double T_r, double a_s, double C, double radius, double atol )
   {
     BarrierTerms out;
-    const Eigen::Vector3d r = p_r - p_h;
-    double d = r.norm();
+    const Eigen::Vector3d r = p_r - p_o;
+    double center_distance = r.norm();
     Eigen::Vector3d u;
-    if (d <= atol)
+    if (center_distance <= atol)
     {
       u = Eigen::Vector3d::UnitX();
-      d = std::max(d, atol);
+      center_distance = std::max(center_distance, atol);
     }
     else
     {
-      u = r / d;
+      u = r / center_distance;
     }
 
-    out.d   = d;
+    // The barrier sees the distance between the sphere surfaces; u and its
+    // rotation rate depend on the centers only.
+    out.d   = center_distance - radius;
     out.v_r = u.dot(v_r);
-    out.v_h = u.dot(v_h);
-    out.a_h = u.dot(a_h);
+    out.v_o = u.dot(v_o);
+    out.a_o = u.dot(a_o);
 
     Eigen::Vector4d dh_dpsi;
-    out.h = barrier(d, out.v_r, out.v_h, out.a_h, T_r, a_s, C, atol, dh_dpsi);
+    out.h = barrier(out.d, out.v_r, out.v_o, out.a_o, T_r, a_s, C, atol, dh_dpsi);
 
     // Time derivative of psi along the drift: the projections change because
-    // u rotates, with du/dt = (I - u u^T)(v_r - v_h)/d.
-    const double d_psi = std::max(d, 1e-3);
-    const Eigen::Vector3d v_diff = v_r - v_h;
+    // u rotates, with du/dt = (I - u u^T)(v_r - v_o)/|p_r - p_o|.
+    const double d_psi = std::max(center_distance, 1e-3);
+    const Eigen::Vector3d v_diff = v_r - v_o;
     Eigen::Vector4d psi_f;
     psi_f(0) = u.dot(v_diff);
     psi_f(1) = ((v_r - u * out.v_r) / d_psi).dot(v_diff);
-    psi_f(2) = ((v_h - u * out.v_h) / d_psi).dot(v_diff) + out.a_h;
-    psi_f(3) = ((a_h - u * out.a_h) / d_psi).dot(v_diff);
+    psi_f(2) = ((v_o - u * out.v_o) / d_psi).dot(v_diff) + out.a_o;
+    psi_f(3) = ((a_o - u * out.a_o) / d_psi).dot(v_diff);
 
     out.lie_f = dh_dpsi.dot(psi_f);
     // Only v_r depends on the robot point acceleration: d(v_r)/d(acc) = u.
