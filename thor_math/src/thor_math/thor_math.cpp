@@ -554,6 +554,31 @@ namespace math
     m_prediction_pos.resize(m_nax*m_nc);
     m_prediction_vel.resize(m_nax*m_nc);
     resizeWorkspace();
+
+    // Inverted Cholesky factor of the constant acceleration block of the cost
+    // (see invertedCholeskyFactor()).
+    const Eigen::Index n_u = static_cast<Eigen::Index>(m_nax) * m_nc;
+    Eigen::LLT<Eigen::MatrixXd> acc_llt(m_H_fixed.topLeftCorner(n_u, n_u));
+    m_ws.acc_chol_valid = acc_llt.info() == Eigen::Success;
+    if (m_ws.acc_chol_valid)
+      m_ws.acc_chol_inv_t = acc_llt.matrixU().solve(Eigen::MatrixXd::Identity(n_u, n_u));
+
+    // Minimum of CI^T x over the variable bounds for every inequality: those
+    // with minimum + ci0 >= 0 hold for every admissible x. The CBF columns are
+    // rebuilt at every cycle and checked in doSolve().
+    m_ws.ci_min.resize(m_CI.cols());
+    for (Eigen::Index col = 0; col < m_CI.cols(); ++col)
+      m_ws.ci_min(col) = m_CI.col(col).cwiseMax(0.0).dot(m_lb) + m_CI.col(col).cwiseMin(0.0).dot(m_ub);
+
+    m_ws.node_inputs.assign(m_nc, 0);
+    for (unsigned int i = 0; i < m_nc; ++i)
+      for (Eigen::Index col = n_u; col > 0; --col)
+        if (!m_position_forced_resp.block(m_nax*i, col-1, m_nax, 1).isZero(0.0) ||
+            !m_velocity_forced_resp.block(m_nax*i, col-1, m_nax, 1).isZero(0.0))
+        {
+          m_ws.node_inputs[i] = col;
+          break;
+        }
     m_are_matrices_updated=true;
   }
 
@@ -567,9 +592,14 @@ namespace math
     m_ws.dqt.resize(n_u, m_nc);
     m_ws.tmp_u.resize(n_u);
     m_ws.qp_H.resize(n_x, n_x);
+    m_ws.scaling_coupling.resize(n_u, m_nc);
+    m_ws.scaling_schur.resize(m_nc, m_nc);
     m_ws.qp_A.resize(n_general, n_x);
     m_ws.qp_lower.resize(n_general);
     m_ws.qp_upper.resize(n_general);
+    // doSolve() passes at most n_general rows; the bundled qpmad keeps buffers
+    // sized for the largest problem seen, so it never reallocates in the loop.
+    m_solver.reserve(n_x, n_x, n_general);
     m_ws.ci0.resize(m_CI.cols());
     m_ws.ci0_base.resize(m_CI.cols());
     m_ws.last_sol.resize(n_x);
@@ -587,7 +617,7 @@ namespace math
     m_ws.dq_ref.resize(n_u);
     m_ws.zero_acc.setZero(m_nax);
     m_ws.c.resize(n_nodes);
-    m_ws.G.resize(n_nodes, n_u);
+    m_ws.G.setZero(n_nodes, n_u);  // the columns of the inputs a node does not depend on stay zero
     m_ws.dh_dq.resize(m_nax);
     m_ws.dh_ddq.resize(m_nax);
     m_ws.J.resize(6, nv);
@@ -621,6 +651,41 @@ namespace math
     m_f.head(m_nax*m_nc).noalias() += m_lambda_jerk * (m_jerk_forced_response.transpose()*m_ws.tmp_u);
 
     m_H=m_H_fixed+m_H_variable;
+  }
+
+  bool ThorQP::invertedCholeskyFactor()
+  {
+    // m_H = [A B; B^T D], with A on the accelerations (constant, A = L_a L_a^T
+    // factorized by updateMatrices()) and D on the time scalings. With
+    // W = L_a^-1 B and D - W^T W = L_s L_s^T:
+    //   L = [L_a 0; W^T L_s],   L^-T = [L_a^-T  -L_a^-T W L_s^-T; 0  L_s^-T]
+    // which costs O(n_u^2 n_c) instead of O(n_x^3) for a full factorization
+    // and inversion. qpmad reads the upper triangle of L^-T.
+    const Eigen::Index n_u = static_cast<Eigen::Index>(m_nax) * m_nc;
+    const Eigen::Index n_s = m_nc;
+    if (!m_ws.acc_chol_valid || m_H.topLeftCorner(n_u, n_u) != m_H_fixed.topLeftCorner(n_u, n_u))
+      return false;
+    const Eigen::MatrixXd& La_inv_t = m_ws.acc_chol_inv_t;
+    Eigen::MatrixXd& W = m_ws.scaling_coupling;
+    W.noalias() = La_inv_t.transpose().triangularView<Eigen::Lower>() * m_H.topRightCorner(n_u, n_s);
+    Eigen::MatrixXd& schur = m_ws.scaling_schur;
+    schur = m_H.bottomRightCorner(n_s, n_s);
+    schur.noalias() -= W.transpose() * W;
+    Eigen::LLT<Eigen::Ref<Eigen::MatrixXd>> schur_llt(schur);
+    if (schur_llt.info() != Eigen::Success)
+      return false;
+
+    Eigen::MatrixXd& U = m_ws.qp_H;
+    U.topLeftCorner(n_u, n_u) = m_ws.acc_chol_inv_t;
+    U.bottomLeftCorner(n_s, n_u).setZero();
+    auto Ls_inv_t = U.bottomRightCorner(n_s, n_s);
+    Ls_inv_t.setIdentity();
+    schur.transpose().triangularView<Eigen::Upper>().solveInPlace(Ls_inv_t);
+    U.topRightCorner(n_u, n_s).noalias() = W * Ls_inv_t.triangularView<Eigen::Upper>();
+    W = U.topRightCorner(n_u, n_s);
+    U.topRightCorner(n_u, n_s).noalias() = La_inv_t.triangularView<Eigen::Upper>() * W;
+    U.topRightCorner(n_u, n_s) *= -1.0;
+    return true;
   }
 
   void ThorQP::setInitialState ( const Eigen::VectorXd& x0 )
@@ -703,6 +768,12 @@ namespace math
     m_cbf_reference = m_sol.head(n_u);
     if (!m_cbf_reference.allFinite())
       m_cbf_reference.setZero();
+    // The cost does not change across the linearizations: factorize it once.
+    // qpmad only reads an inverted Cholesky factor, while it factorizes a
+    // plain Hessian in place, so that one is copied before every QP.
+    qpmad::SolverParameters qp_parameters;
+    qp_parameters.hessian_type_ = invertedCholeskyFactor() ? qpmad::SolverParameters::HESSIAN_INVERTED_CHOLESKY_FACTOR
+                                                           : qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR;
     out.cbf_linearizations = 0;
     out.cbf_linearization_step = 0.0;
     for (unsigned int iteration = 0; iteration < linearizations; ++iteration)
@@ -723,22 +794,39 @@ namespace math
         cbf_rows = !(m_h > m_cbf_activation_distance);
       }
       const Eigen::Index n_in = m_CI.cols() - n_bounds - (m_use_cbf && !cbf_rows ? n_cbf : 0);
-      const Eigen::Index n_general = n_eq + n_in;
+      const Eigen::Index first_cbf = m_CI.cols() - n_cbf;
       m_ws.qp_A.topRows(n_eq) = m_CE.transpose();
-      m_ws.qp_A.middleRows(n_eq, n_in) = m_CI.middleCols(n_bounds, n_in).transpose();
       m_ws.qp_lower.head(n_eq) = -m_ce0;
       m_ws.qp_upper.head(n_eq) = -m_ce0;
-      m_ws.qp_lower.segment(n_eq, n_in) = -ci0.segment(n_bounds, n_in);
-      m_ws.qp_upper.segment(n_eq, n_in).setConstant(std::numeric_limits<double>::infinity());
+      // An inequality CI^T x + ci0 >= 0 that holds for every x within the
+      // variable bounds does not change the feasible set, hence the solution,
+      // and is left out: qpmad multiplies and checks every general constraint
+      // at every iteration, and on the example scene most of them are of this
+      // kind. The number of rows then changes from cycle to cycle; the bundled
+      // qpmad keeps its buffers instead of reallocating them.
+      Eigen::Index n_general = n_eq;
+      for (Eigen::Index col = n_bounds; col < n_bounds + n_in; ++col)
+      {
+        const auto a = m_CI.col(col);
+        const double a_min = col < first_cbf ? m_ws.ci_min(col)
+                                             : a.cwiseMax(0.0).dot(m_lb) + a.cwiseMin(0.0).dot(m_ub);
+        if (a_min + ci0(col) >= 0.0)
+          continue;
+        m_ws.qp_A.row(n_general) = a.transpose();
+        m_ws.qp_lower(n_general) = -ci0(col);
+        ++n_general;
+      }
+      m_ws.qp_upper.segment(n_eq, n_general - n_eq).setConstant(std::numeric_limits<double>::infinity());
 
-      // qpmad factorizes H in place; retain the original cost matrix in ThorQP.
-      m_ws.qp_H = m_H;
+      if (qp_parameters.hessian_type_ == qpmad::SolverParameters::HESSIAN_LOWER_TRIANGULAR)
+        m_ws.qp_H = m_H;
       std::string failure;
       try
       {
         const qpmad::Solver::ReturnStatus status = m_solver.solve(
           m_sol, m_ws.qp_H, m_f, m_lb, m_ub,
-          m_ws.qp_A.topRows(n_general), m_ws.qp_lower.head(n_general), m_ws.qp_upper.head(n_general));
+          m_ws.qp_A.topRows(n_general), m_ws.qp_lower.head(n_general), m_ws.qp_upper.head(n_general),
+          qp_parameters);
         if (status != qpmad::Solver::OK || !m_sol.allFinite())
           failure = "Problem is not feasible. Check the constraints and the target values.";
       }
@@ -963,9 +1051,11 @@ namespace math
           m_ws.dh_dq.noalias()  = b.grad_p.transpose() * v_dv;
           m_ws.dh_dq.noalias() += b.lie_g.transpose() * v_dq;
           m_ws.dh_ddq.noalias() = b.lie_g.transpose() * v_dv;
-          G.row(n).noalias()  = m_ws.dh_dq * m_position_forced_resp.middleRows(m_nax*(m-1), m_nax);
-          G.row(n).noalias() += m_ws.dh_ddq * m_velocity_forced_resp.middleRows(m_nax*(m-1), m_nax);
-          c(n) = b.h - G.row(n).dot(u_ref);
+          // X_m depends only on the first n_dep inputs; the other columns of G are zero.
+          const Eigen::Index n_dep = m_ws.node_inputs[m-1];
+          G.row(n).head(n_dep).noalias()  = m_ws.dh_dq * m_position_forced_resp.block(m_nax*(m-1), 0, m_nax, n_dep);
+          G.row(n).head(n_dep).noalias() += m_ws.dh_ddq * m_velocity_forced_resp.block(m_nax*(m-1), 0, m_nax, n_dep);
+          c(n) = b.h - G.row(n).head(n_dep).dot(u_ref.head(n_dep));
         }
       }
     }

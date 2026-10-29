@@ -368,7 +368,7 @@ and the last solution.
 `n_intervals * robot spheres * obstacle spheres` CBF rows. There is one
 kinematics evaluation per interval (continuous) or per interval plus one
 (discrete), times `cbf_linearizations`. With 6 joints, 5 intervals, 5 robot
-spheres and 3 obstacle spheres, a solve takes about 55–80 µs in Release
+spheres and 3 obstacle spheres, a solve takes about 35–60 µs in Release
 builds with one linearization (see the example and section 3.1).
 
 ### 3.1 Performance
@@ -385,15 +385,18 @@ Profile of one solve on the example scene before the optimizations below
 | cost and constraint assembly | 13 µs |
 | **total** | **~115 µs** |
 
-After the optimizations:
+After the optimizations, with the same solutions:
 
-- **Total time.** It goes to ~77 µs (discrete), ~53 µs (continuous) and
-  ~19 µs (without CBF), with the same solutions.
-- **QP solver.** Passing the bounds as simple bounds alone brought it from
-  52 to 32 µs.
-- **Allocations.** Heap allocations per `solve()` go from 437 to 1.
+| | discrete | continuous | without CBF | N = 4, β = 0.7, tol. 0.5 |
+| --- | --- | --- | --- | --- |
+| before | ~115 µs | ~83 µs | ~32 µs | ~142 µs |
+| first round | ~77 µs | ~53 µs | ~19 µs | ~96 µs |
+| second round | **~58 µs** | **~36 µs** | **~9 µs** | **~72 µs** |
 
-What makes the difference:
+Heap allocations per `solve()` went from 437 to 1 in the first round, and
+the second round adds none.
+
+First round:
 
 - **Simple bounds.** The bounds on the accelerations and on the time scaling
   are passed to qpmad as simple bounds `lb <= x <= ub`. They are not passed
@@ -410,15 +413,61 @@ What makes the difference:
 - **Eigen is not the bottleneck.** At these sizes (35 variables, ~255
   constraints) the time goes into the active-set iterations, the kinematics
   and, before, the allocations, not into the matrix products.
-- **SIMD (AVX2/FMA) is not enabled.** Pinocchio from the ROS packages is
-  built for generic x86-64. Building `thor_math` with `-march=native` makes
-  it binary-incompatible with that Pinocchio, and the example crashes, even
-  with `EIGEN_MAX_ALIGN_BYTES=16`. Enabling it needs Pinocchio, coal,
-  `thor_math` and the application all built from source with the same flags.
 
-Remaining options, not implemented: drop the CBF rows of far pairs
-individually (fewer rows and barriers), and benchmark other QP solvers
-(qpOASES with hot start, HPIPM, ProxQP).
+Second round, after a new profile (discrete: CBF rows ~33 µs, of which
+~14 µs for the rows `G` of the linearized barrier; qpmad ~27 µs, of which
+~7 µs to factorize and invert the Hessian; ~88% of the general constraints
+implied by the bounds):
+
+- **Hessian factorized by blocks.** The block of `m_H` on the accelerations
+  is constant; only the rows of the time scalings change with the target
+  velocity. `updateMatrices()` computes the inverted Cholesky factor of the
+  constant block once, and each cycle completes the factor with the Schur
+  complement of the scalings (5×5) and hands it to qpmad as
+  `HESSIAN_INVERTED_CHOLESKY_FACTOR`. The factor is computed once per cycle,
+  not once per linearization. If a derived class changes the constant block,
+  `solve()` falls back to the full factorization.
+- **Inequalities implied by the bounds are left out.** A row
+  `CI^T x + ci0 >= 0` whose minimum over `lb <= x <= ub` is already >= 0
+  cannot be violated, so leaving it out does not change the feasible set or
+  the solution. qpmad multiplies and checks every general constraint at every
+  iteration; on the example scene ~224 of the 255 rows are of this kind. The
+  minimum is precomputed for the constant rows and computed at every
+  linearization for the CBF rows. `m_CI` and `m_ci0` keep their layout.
+- **Causal CBF rows.** The state at the end of interval `i` depends only on
+  the inputs of intervals `0..i`, so only those columns of each row `G` are
+  computed. `updateMatrices()` finds the nonzero columns of the forced
+  responses instead of assuming them.
+- **qpmad keeps its buffers.** The number of rows passed to qpmad now
+  changes from cycle to cycle, and qpmad reallocated two internal vectors at
+  every change. The bundled copy is modified so that they grow but never
+  shrink (marked `thor_math:` in `include/qpmad/implementation.h`), and
+  `ThorQP` reserves them for the largest problem.
+
+**Build options**, measured on the same scene with Pinocchio 3.3.1 built
+from source (−% of the mean solve time, discrete / continuous / without
+CBF). None of them changes the solution:
+
+| option | gain |
+| --- | --- |
+| `-march=x86-64-v3` (AVX2/FMA) on Pinocchio and `thor_math` | 5 / 8 / 10% |
+| `-march=x86-64-v3 -fno-semantic-interposition -fno-plt` | 6 / 8 / 9% |
+| `-march=x86-64-v3`, Pinocchio without template instantiation | 1 / 10 / 10% |
+| `-march=x86-64-v3` with LTO on `thor_math` | 3 / 5 / 3% |
+| `-march=x86-64-v3 -fno-math-errno -fno-trapping-math` | 3 / 4 / 2% |
+
+- **SIMD needs coherent flags.** Pinocchio from the ROS packages is built for
+  generic x86-64. Building `thor_math` with `-march=native` against it makes
+  the two binary-incompatible (Eigen changes the layout of the objects), and
+  the example crashes, even with `EIGEN_MAX_ALIGN_BYTES=16`. Pinocchio,
+  `thor_math` and the application must all be built with the same flags.
+- **Pinocchio without template instantiation**
+  (`-DENABLE_TEMPLATE_INSTANTIATION=OFF`) builds in ~20 s instead of
+  ~3.5 min with 3 jobs, with no loss in speed.
+
+Remaining options, not implemented: skip the kinematics and the barriers of
+the pairs far from every obstacle, warm-start the active set (qpmad has no
+hot start; qpOASES has), benchmark other QP solvers (HPIPM, ProxQP).
 
 ---
 

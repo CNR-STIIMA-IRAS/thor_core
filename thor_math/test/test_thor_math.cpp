@@ -47,6 +47,26 @@ public:
   const Eigen::VectorXd& gradient() const { return m_f; }
   const Eigen::VectorXd& controlIntervals() const { return m_control_intervals; }
 
+  // Inverted Cholesky factor built from the constant acceleration block.
+  bool blockInvertedFactor(Eigen::MatrixXd& factor)
+  {
+    if (!invertedCholeskyFactor())
+      return false;
+    factor = m_ws.qp_H.triangularView<Eigen::Upper>();
+    return true;
+  }
+
+  // Inequalities after the variable bounds that hold for every x within them,
+  // with the offsets of the last solve.
+  Eigen::Index redundantInequalities() const
+  {
+    Eigen::Index count = 0;
+    for (Eigen::Index col = 2 * m_H.rows(); col < m_CI.cols(); ++col)
+      if (m_CI.col(col).cwiseMax(0.0).dot(m_lb) + m_CI.col(col).cwiseMin(0.0).dot(m_ub) + m_ci0_solved(col) >= 0.0)
+        ++count;
+    return count;
+  }
+
   // Predicted [q; dq] at node m (0: x0, m: end of interval m-1) for inputs u.
   Eigen::VectorXd node(const Eigen::VectorXd& x0, const Eigen::VectorXd& u, unsigned int m) const
   {
@@ -815,7 +835,10 @@ TEST_F(ThorQpIntegrationTest, SimpleBoundsGiveTheSameSolutionAsGeneralRows)
     in.obstacle_vel = {Eigen::Vector3d::Zero()};
     in.obstacle_radius = {0.15};
 
+    // ThorQP also leaves out the inequalities that the bounds already imply and
+    // factorizes the cost by blocks; the reference below has neither.
     int cycles_with_active_bounds = 0;
+    Eigen::Index redundant = 0;
     for (int cycle = 0; cycle < 20; ++cycle) {
       SCOPED_TRACE(cycle);
       in.x0 = qp.getState();
@@ -823,8 +846,12 @@ TEST_F(ThorQpIntegrationTest, SimpleBoundsGiveTheSameSolutionAsGeneralRows)
       ThorOutput out;
       ASSERT_NO_THROW(out = qp.solve(in));
       ASSERT_LT(out.cbf.h_min, config.cbf_activation_distance);  // all the CBF rows are in the QP
+      redundant += qp.redundantInequalities();
 
       Eigen::MatrixXd hessian = qp.hessian();
+      Eigen::MatrixXd factor;
+      ASSERT_TRUE(qp.blockInvertedFactor(factor));
+      EXPECT_TRUE((factor * factor.transpose() * hessian).isIdentity(1e-9));
       Eigen::VectorXd reference;
       qpmad::Solver solver;
       const Eigen::Index rows = qp.inequalities().cols();
@@ -840,6 +867,7 @@ TEST_F(ThorQpIntegrationTest, SimpleBoundsGiveTheSameSolutionAsGeneralRows)
       qp.updateState(out.next_acc);
     }
     EXPECT_GT(cycles_with_active_bounds, 0);  // the simple bounds were exercised
+    EXPECT_GT(redundant, 0);                  // and so was the reduction of the QP
   }
 }
 

@@ -6,6 +6,10 @@
     Version 2.0. (see LICENSE or http://www.apache.org/licenses/LICENSE-2.0)
 
     @brief Solver implementation
+
+    Modified for thor_math: the buffers sized by the number of constraints
+    grow but never shrink, so that solving problems with a varying number of
+    general constraints does not reallocate (see "thor_math:" below).
 */
 
 
@@ -176,7 +180,11 @@ namespace qpmad
                 const MatrixIndex num_general_constraints)
         {
             reserveMachinery(primal_size, num_general_constraints);
-            constraints_status_.resize(num_simple_bounds + num_general_constraints);
+            // thor_math: grow only (was an unconditional resize)
+            if (constraints_status_.size() < num_simple_bounds + num_general_constraints)
+            {
+                constraints_status_.resize(num_simple_bounds + num_general_constraints);
+            }
             reserveDual(primal_size);
         }
 
@@ -256,7 +264,11 @@ namespace qpmad
 
             // check consistency of general constraints and activate
             // equality constraints
-            constraints_status_.resize(num_constraints_);
+            // thor_math: grow only (was an unconditional resize)
+            if (constraints_status_.size() < num_constraints_)
+            {
+                constraints_status_.resize(num_constraints_);
+            }
             MatrixIndex num_equalities = 0;
             for (MatrixIndex i = 0; i < num_constraints_; ++i)
             {
@@ -603,7 +615,11 @@ namespace qpmad
         {
             active_set_.initialize(primal_size);
             primal_step_direction_.resize(primal_size);
-            general_ctr_dot_primal_.resize(num_general_constraints);
+            // thor_math: grow only (was an unconditional resize)
+            if (general_ctr_dot_primal_.size() < num_general_constraints)
+            {
+                general_ctr_dot_primal_.resize(num_general_constraints);
+            }
 
             factorization_data_.reserve(primal_size);
         }
@@ -663,7 +679,13 @@ namespace qpmad
 
             if ((std::abs(chosen_ctr_.violation_) < tolerance) && (num_general_constraints_ > 0))
             {
-                general_ctr_dot_primal_.noalias() = A * primal;
+                // thor_math: the buffer may be longer than A, and this may run
+                // before reserveMachinery() (the assignment used to size it)
+                if (general_ctr_dot_primal_.size() < num_general_constraints_)
+                {
+                    general_ctr_dot_primal_.resize(num_general_constraints_);
+                }
+                general_ctr_dot_primal_.head(num_general_constraints_).noalias() = A * primal;
                 for (MatrixIndex i = num_simple_bounds_; i < num_constraints_; ++i)
                 {
                     if (ConstraintStatus::INACTIVE == constraints_status_[i])

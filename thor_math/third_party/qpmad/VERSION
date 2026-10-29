@@ -1,3 +1,5 @@
 qpmad 1.5.1
 commit 11602ec9f87a62a97ba8318ebd81da6646f3c631
 source https://github.com/asherikov/qpmad
+modified for thor_math: buffers sized by the number of constraints grow but
+never shrink (see "thor_math:" in include/qpmad/implementation.h)

@@ -505,11 +505,24 @@ class ThorQP
       // other inequalities (and the equalities) as general constraints.
       Eigen::MatrixXd qp_H, qp_A;
       Eigen::VectorXd qp_lower, qp_upper;
+      // The block of m_H on the accelerations is constant: its inverted
+      // Cholesky factor is computed once by updateMatrices(), and each cycle
+      // only completes the factor for the time scalings.
+      Eigen::MatrixXd acc_chol_inv_t;              // L_a^-T, upper triangular
+      bool acc_chol_valid = false;
+      Eigen::MatrixXd scaling_coupling;            // L_a^-1 times the acceleration-scaling block of m_H
+      Eigen::MatrixXd scaling_schur;               // its Schur complement, factorized in place
+      // Minimum over the variable bounds of CI^T x for every column of m_CI;
+      // used to skip the inequalities that no x within the bounds can violate.
+      Eigen::VectorXd ci_min;
       Eigen::VectorXd ci0, ci0_base, last_sol, last_ci0;
       Eigen::MatrixXd last_cbf_columns;
       // CBF construction
       Eigen::VectorXd q_ref, dq_ref, zero_acc, c;
       Eigen::MatrixXd G;
+      // Inputs that the state at the end of interval i can depend on: the
+      // nonzero columns of its rows in the forced responses (causality).
+      std::vector<Eigen::Index> node_inputs;
       Eigen::RowVectorXd dh_dq, dh_ddq;
       Eigen::Matrix<double, 6, Eigen::Dynamic> J, dJ, local_dq, local_dv;
       Eigen::Matrix<double, 3, Eigen::Dynamic> v_dq, v_dv;
@@ -519,6 +532,13 @@ class ThorQP
 
     /// @brief Sizes the workspace of solve() for the current settings.
     void resizeWorkspace();
+    /**
+     * @brief Writes into `m_ws.qp_H` the inverted Cholesky factor of `m_H`,
+     *        reusing the factor of the constant acceleration block.
+     * @return false if the block structure does not hold (e.g. a derived class
+     *         changed it); `m_H` must then be factorized from scratch.
+     */
+    bool invertedCholeskyFactor();
     Eigen::VectorXd    m_ci0_solved;      // inequality offsets of the last solve, CBF rows included
     /// @endcond
 

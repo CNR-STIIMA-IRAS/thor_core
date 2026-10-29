@@ -107,9 +107,13 @@ is covered by spheres as well.
   - the CBF rows of both formulations; the discrete rows are rebuilt by finite
     differences on the nonlinear kinematics, also after a re-linearization;
   - `frameVelocityDerivatives()`;
-  - the solution with simple bounds against the solution of the original
-    problem with the bounds as general rows, over 20 cycles with saturated
-    accelerations, for both formulations;
+  - the solution with simple bounds, the inequalities implied by the bounds
+    left out and the Hessian factorized by blocks against the solution of the
+    original problem with the bounds as general rows, over 20 cycles with
+    saturated accelerations, for both formulations; the block factor is also
+    checked against the inverse of the Hessian;
+  - a reused qpmad solver against a fresh one on problems whose number of
+    general constraints shrinks and grows, with and without simple bounds;
   - the radii, the per-obstacle `delta_H` and the input validation.
 - Build: with the Ninja generators the parallel compile and link jobs are
   capped by the physical memory, assuming `THOR_MATH_JOB_MEMORY_MB` (3072)
@@ -142,8 +146,8 @@ is covered by spheres as well.
   frame.
 - `solve()` no longer prints the barrier diagnostics on `std::cout`; they are
   returned in `ThorOutput::cbf`.
-- Faster solve, measured on the example scene: from ~115 to ~77 µs
-  (discrete), from ~83 to ~53 µs (continuous), and from ~32 to ~19 µs
+- Faster solve, measured on the example scene: from ~115 to ~58 µs
+  (discrete), from ~83 to ~36 µs (continuous), and from ~32 to ~9 µs
   without CBF. The solution is unchanged.
   - The bounds on the accelerations and on the time scaling are passed to
     qpmad as simple bounds instead of identity rows of the constraint
@@ -153,6 +157,17 @@ is covered by spheres as well.
     without heap allocations, and `solve()` copies the input only when it
     must complete it with defaults. Heap allocations per `solve()` go from
     437 to 1, the returned `ThorOutput::next_acc`.
+  - The constant acceleration block of the Hessian is factorized once by
+    `updateMatrices()`; each cycle only completes the inverted Cholesky
+    factor for the time scalings and passes it to qpmad, once for all the
+    linearizations of the cycle.
+  - The inequalities that hold for every input within the bounds (most of
+    them on the example scene) are not passed to qpmad.
+  - The rows of the discrete CBF are computed only on the inputs that the
+    state at the end of each interval depends on.
+- The bundled qpmad keeps the buffers sized by the number of constraints
+  instead of reallocating them when it changes (changes marked `thor_math:`
+  in `include/qpmad/implementation.h`).
 - `thor_math.h` includes `<qpmad/solver.h>`, which is installed with the
   package.
 - When the QP fails, the stored solution is reset to zero. The next cycle uses

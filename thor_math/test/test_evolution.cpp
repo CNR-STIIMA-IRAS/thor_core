@@ -349,6 +349,58 @@ TEST(QuadraticProgram, ReportsInfeasibleConstraints)
                std::runtime_error);
 }
 
+// The bundled qpmad keeps its buffers when the number of general constraints
+// changes (ThorQP leaves out the redundant ones): a reused solver must give the
+// solution of a fresh one, also when the problem shrinks and grows again.
+TEST(QuadraticProgram, ReusedSolverHandlesAVaryingNumberOfConstraints)
+{
+  Eigen::MatrixXd original_hessian(3, 3);
+  original_hessian << 4.0, 1.0, 0.0,
+                      1.0, 3.0, 0.5,
+                      0.0, 0.5, 2.0;
+  Eigen::VectorXd gradient(3);
+  gradient << -8.0, -6.0, -4.0;
+  Eigen::MatrixXd all_constraints(4, 3);
+  all_constraints << 1.0,  1.0, 1.0,
+                     1.0, -1.0, 0.0,
+                     0.0,  1.0, 2.0,
+                     1.0,  0.0, 0.0;
+  Eigen::VectorXd all_upper(4);
+  all_upper << 1.5, 0.2, 2.0, 0.4;
+  const Eigen::VectorXd lower_bounds = Eigen::VectorXd::Constant(3, -1.0);
+  const Eigen::VectorXd upper_bounds = Eigen::VectorXd::Constant(3, 1.0);
+
+  // With and without simple bounds: qpmad takes different paths before sizing
+  // its buffers.
+  for (const bool simple_bounds : {true, false}) {
+    SCOPED_TRACE(simple_bounds ? "with simple bounds" : "general constraints only");
+    const auto solve = [&](qpmad::Solver& solver, Eigen::VectorXd& solution, const Eigen::MatrixXd& constraints,
+                           const Eigen::VectorXd& lower, const Eigen::VectorXd& upper) {
+      Eigen::MatrixXd hessian = original_hessian;
+      return simple_bounds
+        ? solver.solve(solution, hessian, gradient, lower_bounds, upper_bounds, constraints, lower, upper)
+        : solver.solve(solution, hessian, gradient, constraints, lower, upper);
+    };
+    qpmad::Solver reused;
+    if (simple_bounds)
+      reused.reserve(3, 3, 2);  // smaller than the largest problem below
+    for (const Eigen::Index rows : {Eigen::Index(4), Eigen::Index(1), Eigen::Index(3), Eigen::Index(0), Eigen::Index(4)}) {
+      SCOPED_TRACE(rows);
+      const Eigen::MatrixXd constraints = all_constraints.topRows(rows);
+      const Eigen::VectorXd lower = Eigen::VectorXd::Constant(rows, -std::numeric_limits<double>::infinity());
+      const Eigen::VectorXd upper = all_upper.head(rows);
+
+      Eigen::VectorXd solution, reference;
+      ASSERT_EQ(solve(reused, solution, constraints, lower, upper), qpmad::Solver::OK);
+      qpmad::Solver fresh;
+      ASSERT_EQ(solve(fresh, reference, constraints, lower, upper), qpmad::Solver::OK);
+      EXPECT_TRUE(solution.isApprox(reference, 1e-12)) << solution.transpose() << " vs " << reference.transpose();
+      if (rows > 0)
+        EXPECT_LE((constraints * solution - upper).maxCoeff(), 1e-9);
+    }
+  }
+}
+
 TEST(ThorQpConfig, ConstructorConfigures)
 {
   ThorQP qp(makeConfig());
