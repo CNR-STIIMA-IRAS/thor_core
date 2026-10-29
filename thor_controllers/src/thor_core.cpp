@@ -256,6 +256,7 @@ void ThorCore::setObstacles(const std::vector<Obstacle> & obstacles)
 void ThorCore::Impl::selectObstacles()
 {
   const std::size_t m = in.obstacle_pos.size();
+  out.min_distance = std::numeric_limits<double>::infinity();
   if (m == 0) return;
 
   // Distance of each obstacle from the closest robot sphere, at the current state.
@@ -274,6 +275,7 @@ void ThorCore::Impl::selectObstacles()
   }
   std::iota(obstacle_order.begin(), obstacle_order.end(), 0);
   const std::size_t used = std::min(m, obstacles.size());
+  if (used > 0) out.min_distance = *std::min_element(obstacle_distance.begin(), obstacle_distance.end());
   std::partial_sort(obstacle_order.begin(), obstacle_order.begin() + static_cast<std::ptrdiff_t>(used),
                     obstacle_order.end(), [this](std::size_t a, std::size_t b) {
                       return obstacle_distance[a] < obstacle_distance[b];

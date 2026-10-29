@@ -1,4 +1,5 @@
-<library path="thor_controllers">
+<class_libraries>
+<library path="thor_trajectory_controller">
   <class name="thor_controllers/ThorTrajectoryController"
          type="thor_controllers::ThorTrajectoryController"
          base_class_type="controller_interface::ControllerInterface">
@@ -8,3 +9,15 @@
     </description>
   </class>
 </library>
+<library path="thor_chainable_controller">
+  <class name="thor_controllers/ThorChainableController"
+         type="thor_controllers::ThorChainableController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>
+      The THOR MPC as a chainable controller between a trajectory controller and the robot:
+      reference interfaces for position, velocity and acceleration, and a speed_scaling state
+      interface for joint_trajectory_controller.
+    </description>
+  </class>
+</library>
+</class_libraries>

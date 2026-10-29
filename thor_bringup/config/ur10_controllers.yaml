@@ -1,0 +1,72 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+joint_state_broadcaster:
+  ros__parameters:
+    type: joint_state_broadcaster/JointStateBroadcaster
+
+# joint_trajectory_controller with the THOR MPC between the trajectory and
+# the robot. Parameters without the thor. prefix are those of
+# joint_trajectory_controller.
+thor_controller:
+  ros__parameters:
+    type: thor_controllers/ThorTrajectoryController
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    allow_partial_joints_goal: true
+    # Tolerances of joint_trajectory_controller are checked against the
+    # nominal trajectory: the MPC moves away from it near obstacles, so path
+    # tolerances stay off (0) and only the goal is checked.
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.0  # the trajectory slows down near obstacles: no deadline
+
+    thor:
+      state_feedback: open_loop  # position commands
+      target_scaling: 1.0
+      horizon:
+        n_intervals: 5
+        time: 0.2
+      weights:
+        acceleration: 0.000001
+        jerk: 0.0
+        scaling: 50.0
+        clik: 10000.0
+      limits:
+        velocity: [2.0, 2.0, 2.0, 3.0, 3.0, 3.0]
+        acceleration: [10.0, 10.0, 10.0, 15.0, 15.0, 15.0]
+        position_bounds: true
+        min_scaling: 0.0
+        max_scaling: 1.0
+      cbf:
+        enabled: true
+        braking_deceleration: 2.5
+        reaction_time: 0.15
+        safety_margin: 0.05
+        gamma: 5.0
+        distance_error: 0.02
+        max_obstacles: 4
+      obstacles:
+        topic: ~/obstacles
+        frame_id: world
+        timeout: 0.5
+      robot_spheres:
+        names: [shoulder, upper_arm_0, upper_arm_1, upper_arm_2, elbow, forearm_1, forearm_2, wrist_1, wrist_2, tool]
+        shoulder:    {frame: shoulder_link,  offset: [0.0, 0.0, 0.0],    radius: 0.10}
+        upper_arm_0: {frame: upper_arm_link, offset: [0.0, 0.0, 0.175],  radius: 0.10}
+        upper_arm_1: {frame: upper_arm_link, offset: [-0.2, 0.0, 0.175], radius: 0.08}
+        upper_arm_2: {frame: upper_arm_link, offset: [-0.4, 0.0, 0.175], radius: 0.08}
+        elbow:       {frame: upper_arm_link, offset: [-0.612, 0.0, 0.1], radius: 0.10}
+        forearm_1:   {frame: forearm_link,   offset: [-0.2, 0.0, 0.05],  radius: 0.07}
+        forearm_2:   {frame: forearm_link,   offset: [-0.4, 0.0, 0.05],  radius: 0.07}
+        wrist_1:     {frame: wrist_1_link,   offset: [0.0, 0.0, 0.0],    radius: 0.07}
+        wrist_2:     {frame: wrist_2_link,   offset: [0.0, 0.0, 0.0],    radius: 0.07}
+        tool:        {frame: tool0,          offset: [0.0, 0.0, 0.05],   radius: 0.08}

@@ -18,9 +18,15 @@ float64 solve_time
 uint32 n_obstacles
 bool obstacles_stale
 
-# The robot-obstacle pair with the lowest barrier over the horizon; zero
-# with the CBF disabled. See thor_math CbfDiagnostics.
+# Distance between the surfaces of the robot spheres and of the closest
+# obstacle at the current state [m]; infinite without obstacles.
+float64 min_distance
+
+# Barrier on the current state [m]: the actual safety margin.
 float64 h_now
+# The robot-obstacle pair with the lowest barrier over the horizon; zero
+# with the CBF disabled. See thor_math CbfDiagnostics: its distance and
+# velocities may be on a predicted state of the nominal trajectory.
 float64 h_min
 float64 distance
 float64 v_robot

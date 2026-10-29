@@ -213,6 +213,12 @@ thor_controllers:
           validation:
             gt_eq<>: [0.0]
 
+    state_topic:
+      type: string
+      default_value: "~/thor_state"
+      description: "Topic of the controller state (thor_msgs/msg/ThorControllerState)."
+      read_only: true
+
     obstacles:
       topic:
         type: string

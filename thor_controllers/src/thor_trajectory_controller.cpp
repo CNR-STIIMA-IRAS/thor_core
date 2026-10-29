@@ -155,7 +155,7 @@ void ThorTrajectoryController::samplePreview(double scaling)
   if (!msg || msg->points.empty() || !current_trajectory_->is_sampled_already())
   {
     // Nothing to follow yet: stay where the controller is.
-    input_.next_target_q = ros_core_.core().state().head(n);
+    input_.next_target_q = last_output_ ? last_output_->q : input_.measured_q;
     input_.target_dq.setZero();
     for (std::size_t i = 0; i < dof_; ++i) reference_q_[i] = input_.next_target_q(static_cast<Eigen::Index>(i));
     return;

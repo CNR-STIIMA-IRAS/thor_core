@@ -8,6 +8,7 @@
 #ifndef THOR_CONTROLLERS__THOR_CORE_HPP_
 #define THOR_CONTROLLERS__THOR_CORE_HPP_
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -99,6 +100,11 @@ struct CoreOutput
   double scaling = 1.0;
   double solve_time = 0.0;  ///< [s]
   unsigned int n_obstacles = 0;
+  /// Distance between the surfaces of the robot spheres and of the closest
+  /// obstacle at the current state [m]; infinite without obstacles.
+  double min_distance = std::numeric_limits<double>::infinity();
+  /// The pair with the lowest barrier over the horizon: its distance may be
+  /// on a predicted state of the nominal trajectory, not on the current one.
   thor::math::CbfDiagnostics cbf;
   std::string cbf_frame;  ///< Name of the robot frame of #cbf (empty without CBF).
 };

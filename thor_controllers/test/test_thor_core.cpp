@@ -87,6 +87,7 @@ struct RunResult
   double min_scaling = std::numeric_limits<double>::infinity();
   double final_scaling = 0.0;
   double max_deviation = 0.0;  ///< largest displacement of joints 2..6 from q0
+  double min_distance = std::numeric_limits<double>::infinity();
 };
 
 // Runs the closed loop for `steps` cycles.
@@ -101,6 +102,7 @@ RunResult run(ThorCore & core, const Eigen::VectorXd & q0, double v, int steps)
     if (core.settings().mpc.cbf) r.h_min = std::min(r.h_min, out.cbf.h_now);
     r.min_scaling = std::min(r.min_scaling, out.scaling);
     r.final_scaling = out.scaling;
+    r.min_distance = std::min(r.min_distance, out.min_distance);
     r.max_deviation = std::max(r.max_deviation, (out.q.tail(5) - q0.tail(5)).cwiseAbs().maxCoeff());
   }
   return r;
@@ -257,6 +259,7 @@ TEST(ThorCore, KeepsDistanceFromObstacleOnThePath)
   const RunResult r = run(safe_core, kHome, 0.8, 1500);
   // Safe all the time...
   EXPECT_GE(r.h_min, -1e-3);
+  EXPECT_GT(r.min_distance, 0.05 - 1e-3);  // the safety margin C
   for (const auto & c : safe_core.sphereCenters())
   {
     const Eigen::Vector3d d = c - person.position;
@@ -286,6 +289,8 @@ TEST(ThorCore, UsesTheClosestObstacles)
   const CoreOutput & out = core.step(constantVelocityInput(core, kHome, 0.0, 0.0));
   EXPECT_EQ(out.n_obstacles, 1u);
   EXPECT_EQ(out.cbf.obstacle_index, 0u);
+  EXPECT_GT(out.min_distance, 0.3);
+  EXPECT_LT(out.min_distance, 0.6);
   // The near obstacle, seen from the closest robot sphere, not the far one.
   EXPECT_GT(out.cbf.distance, 0.3);
   EXPECT_LT(out.cbf.distance, 0.6);

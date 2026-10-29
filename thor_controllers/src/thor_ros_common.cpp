@@ -119,7 +119,7 @@ void ThorRosCore::configure(
     });
 
   state_pub_ = node->create_publisher<thor_msgs::msg::ThorControllerState>(
-    "~/thor_state", rclcpp::SystemDefaultsQoS());
+    params.thor.state_topic, rclcpp::SystemDefaultsQoS());
   rt_state_pub_ = std::make_unique<StatePublisher>(state_pub_);
 }
 
@@ -171,6 +171,7 @@ void ThorRosCore::publishState(
   m.scaling = out.scaling;
   m.solve_time = out.solve_time;
   m.n_obstacles = out.n_obstacles;
+  m.min_distance = out.min_distance;
   m.obstacles_stale = obstacles_stale_;
   m.h_now = out.cbf.h_now;
   m.h_min = out.cbf.h_min;

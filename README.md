@@ -11,6 +11,9 @@ Core libraries for THOR.
 ## Packages
 
 - `thor_math`: math utilities built on Eigen and Pinocchio, including `ThorQP`, an MPC for manipulators that scales the speed of a nominal trajectory and keeps a safe distance from dynamic obstacles (spheres or capsules) through a control barrier function.
+- [`thor_msgs`](thor_msgs): obstacles and controller state messages (ROS 2).
+- [`thor_controllers`](thor_controllers): ros2_control controllers with the `ThorQP` MPC between a joint trajectory and the robot: `ThorTrajectoryController`, derived from `joint_trajectory_controller`, and `ThorChainableController`, to chain after any trajectory controller.
+- [`thor_bringup`](thor_bringup): UR10 with mock hardware, integration test, and an RViz demo where a simulated person, driven with *2D Goal Pose*, walks into the path of the robot.
 
 ## Dependencies
 
@@ -53,6 +56,27 @@ cmake -S <your app> -B <build> -DCMAKE_PREFIX_PATH=install/x86-64-v3
 - **Parallel jobs** are sized by the physical memory (3 GB per job, 4 GB left to the system), because a translation unit that includes Pinocchio peaks at a few GB.
 - **Pinocchio without precompiled template instances** (`--template-instantiation off`, the default) builds in seconds instead of minutes, and is as fast at run time.
 - The configuration is recorded in `<prefix>/share/thor_math/build-info.txt`. `scripts/build_thor.sh --help` lists all the options; measured gains of the build options are in [thor_math/docs/api.md](thor_math/docs/api.md) (section 3.1).
+
+## ROS 2 workspace (Jazzy)
+
+The ROS 2 packages, and `thor_math` with them, build with colcon against the
+Pinocchio of ROS. `scripts/build_thor.sh` leaves a `COLCON_IGNORE` in `deps/`
+and in its install prefix, so that colcon does not see a second Pinocchio or
+`thor_math`; if you fetched `deps/` by hand, add it yourself.
+
+```bash
+mkdir -p ~/thor_ws/src && cd ~/thor_ws/src
+git clone https://github.com/CNR-STIIMA-IRAS/thor_core.git
+cd ~/thor_ws
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon test --packages-select thor_controllers thor_bringup
+source install/setup.bash
+ros2 launch thor_bringup ur10_thor.launch.py
+```
+
+On machines with little memory, limit the parallel jobs (`MAKEFLAGS=-j2`),
+since translation units that include Pinocchio take a few GB each.
 
 ## Example
 

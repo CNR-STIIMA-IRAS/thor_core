@@ -1,0 +1,26 @@
+# Parameters of ThorChainableController besides the "thor." ones.
+thor_chainable_controller:
+  joints:
+    type: string_array
+    default_value: []
+    description: "Joints of the robot, in the order of the reference interfaces."
+    read_only: true
+    validation:
+      unique<>: null
+      not_empty<>: null
+  command_interfaces:
+    type: string_array
+    default_value: ["position"]
+    description: "Command interfaces of the robot: position, velocity, position+velocity, position+acceleration or position+velocity+acceleration."
+    read_only: true
+    validation:
+      unique<>: null
+      subset_of<>: [["position", "velocity", "acceleration"]]
+  state_interfaces:
+    type: string_array
+    default_value: ["position", "velocity"]
+    description: "State interfaces of the robot: position, and velocity for thor.state_feedback 'full'."
+    read_only: true
+    validation:
+      unique<>: null
+      subset_of<>: [["position", "velocity"]]

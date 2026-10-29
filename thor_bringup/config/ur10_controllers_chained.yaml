@@ -1,0 +1,95 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+joint_state_broadcaster:
+  ros__parameters:
+    type: joint_state_broadcaster/JointStateBroadcaster
+
+# A standard joint_trajectory_controller in front of the THOR chainable
+# controller: it writes the reference interfaces of thor_chainable and
+# advances its trajectory with the time scaling that thor_chainable exports.
+# It is called thor_controller so that the action is the same as with
+# ThorTrajectoryController (ur10_controllers.yaml).
+thor_controller:
+  ros__parameters:
+    type: joint_trajectory_controller/JointTrajectoryController
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+    command_joints:
+      - thor_chainable/shoulder_pan_joint
+      - thor_chainable/shoulder_lift_joint
+      - thor_chainable/elbow_joint
+      - thor_chainable/wrist_1_joint
+      - thor_chainable/wrist_2_joint
+      - thor_chainable/wrist_3_joint
+    command_interfaces: [position, velocity, acceleration]
+    state_interfaces: [position, velocity]
+    speed_scaling:
+      state_interface: thor_chainable/speed_scaling
+    allow_partial_joints_goal: true
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.0
+
+thor_chainable:
+  ros__parameters:
+    type: thor_controllers/ThorChainableController
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+
+    thor:
+      state_feedback: open_loop  # position commands
+      target_scaling: 1.0
+      horizon:
+        n_intervals: 5
+        time: 0.2
+      weights:
+        acceleration: 0.000001
+        jerk: 0.0
+        scaling: 50.0
+        clik: 10000.0
+      limits:
+        velocity: [2.0, 2.0, 2.0, 3.0, 3.0, 3.0]
+        acceleration: [10.0, 10.0, 10.0, 15.0, 15.0, 15.0]
+        position_bounds: true
+        min_scaling: 0.0
+        max_scaling: 1.0
+      cbf:
+        enabled: true
+        braking_deceleration: 2.5
+        reaction_time: 0.15
+        safety_margin: 0.05
+        gamma: 5.0
+        distance_error: 0.02
+        max_obstacles: 4
+      obstacles:
+        topic: /thor_controller/obstacles
+        frame_id: world
+        timeout: 0.5
+      # The same topics as ThorTrajectoryController in ur10_controllers.yaml.
+      state_topic: /thor_controller/thor_state
+      robot_spheres:
+        names: [shoulder, upper_arm_0, upper_arm_1, upper_arm_2, elbow, forearm_1, forearm_2, wrist_1, wrist_2, tool]
+        shoulder:    {frame: shoulder_link,  offset: [0.0, 0.0, 0.0],    radius: 0.10}
+        upper_arm_0: {frame: upper_arm_link, offset: [0.0, 0.0, 0.175],  radius: 0.10}
+        upper_arm_1: {frame: upper_arm_link, offset: [-0.2, 0.0, 0.175], radius: 0.08}
+        upper_arm_2: {frame: upper_arm_link, offset: [-0.4, 0.0, 0.175], radius: 0.08}
+        elbow:       {frame: upper_arm_link, offset: [-0.612, 0.0, 0.1], radius: 0.10}
+        forearm_1:   {frame: forearm_link,   offset: [-0.2, 0.0, 0.05],  radius: 0.07}
+        forearm_2:   {frame: forearm_link,   offset: [-0.4, 0.0, 0.05],  radius: 0.07}
+        wrist_1:     {frame: wrist_1_link,   offset: [0.0, 0.0, 0.0],    radius: 0.07}
+        wrist_2:     {frame: wrist_2_link,   offset: [0.0, 0.0, 0.0],    radius: 0.07}
+        tool:        {frame: tool0,          offset: [0.0, 0.0, 0.05],   radius: 0.08}

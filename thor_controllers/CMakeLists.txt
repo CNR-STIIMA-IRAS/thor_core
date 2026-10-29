@@ -27,6 +27,7 @@ foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
 endforeach()
 
 generate_parameter_library(thor_parameters src/thor_parameters.yaml)
+generate_parameter_library(thor_chainable_parameters src/thor_chainable_parameters.yaml)
 
 # The MPC without ROS: tested on its own.
 add_library(thor_core SHARED src/thor_core.cpp)
@@ -37,28 +38,43 @@ target_include_directories(thor_core PUBLIC
 )
 target_link_libraries(thor_core PUBLIC thor_math::thor_math pinocchio::pinocchio Eigen3::Eigen)
 
-add_library(thor_controllers SHARED
-  src/thor_ros_common.cpp
-  src/thor_trajectory_controller.cpp
-)
-target_compile_features(thor_controllers PUBLIC cxx_std_20)
-target_include_directories(thor_controllers PUBLIC
+# The ROS side shared by the controllers. It must not link
+# joint_trajectory_controller: a plugin library that links another plugin
+# library hides the plugins of the latter from class_loader.
+add_library(thor_ros_common SHARED src/thor_ros_common.cpp)
+target_compile_features(thor_ros_common PUBLIC cxx_std_20)
+target_include_directories(thor_ros_common PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
-target_link_libraries(thor_controllers PUBLIC
+target_link_libraries(thor_ros_common PUBLIC
   thor_core
   thor_parameters
-  controller_interface::controller_interface
-  hardware_interface::hardware_interface
-  joint_trajectory_controller::joint_trajectory_controller
-  pluginlib::pluginlib
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
   realtime_tools::realtime_tools
   ${thor_msgs_TARGETS}
+)
+
+add_library(thor_chainable_controller SHARED src/thor_chainable_controller.cpp)
+target_link_libraries(thor_chainable_controller PUBLIC
+  thor_ros_common
+  thor_chainable_parameters
+  controller_interface::controller_interface
+  hardware_interface::hardware_interface
+  pluginlib::pluginlib
+)
+
+add_library(thor_trajectory_controller SHARED src/thor_trajectory_controller.cpp)
+target_link_libraries(thor_trajectory_controller PUBLIC
+  thor_ros_common
+  joint_trajectory_controller::joint_trajectory_controller
+  controller_interface::controller_interface
+  hardware_interface::hardware_interface
+  pluginlib::pluginlib
   ${trajectory_msgs_TARGETS}
 )
+
 pluginlib_export_plugin_description_file(controller_interface thor_controllers.xml)
 
 if(BUILD_TESTING)
@@ -73,8 +89,12 @@ if(BUILD_TESTING)
   target_compile_definitions(test_thor_core PRIVATE THOR_TEST_URDF="${THOR_TEST_URDF}")
 
   ament_add_gmock(test_thor_trajectory_controller test/test_thor_trajectory_controller.cpp)
-  target_link_libraries(test_thor_trajectory_controller thor_controllers)
+  target_link_libraries(test_thor_trajectory_controller thor_trajectory_controller)
   target_compile_definitions(test_thor_trajectory_controller PRIVATE THOR_TEST_URDF="${THOR_TEST_URDF}")
+
+  ament_add_gmock(test_thor_chainable_controller test/test_thor_chainable_controller.cpp)
+  target_link_libraries(test_thor_chainable_controller thor_chainable_controller)
+  target_compile_definitions(test_thor_chainable_controller PRIVATE THOR_TEST_URDF="${THOR_TEST_URDF}")
 endif()
 
 install(
@@ -82,7 +102,8 @@ install(
   DESTINATION include/${PROJECT_NAME}
 )
 install(
-  TARGETS thor_core thor_controllers thor_parameters
+  TARGETS thor_core thor_ros_common thor_chainable_controller thor_trajectory_controller
+    thor_parameters thor_chainable_parameters
   EXPORT export_thor_controllers
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
