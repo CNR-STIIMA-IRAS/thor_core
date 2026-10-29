@@ -41,6 +41,22 @@ public:
     return result;
   }
 
+  const Eigen::VectorXd& solvedOffsets() const { return m_ci0_solved; }
+  void setSolution(const Eigen::VectorXd& solution) { m_sol = solution; }
+  const Eigen::VectorXd& controlIntervals() const { return m_control_intervals; }
+
+  // Predicted [q; dq] at node m (0: x0, m: end of interval m-1) for inputs u.
+  Eigen::VectorXd node(const Eigen::VectorXd& x0, const Eigen::VectorXd& u, unsigned int m) const
+  {
+    if (m == 0)
+      return x0;
+    Eigen::VectorXd x(2 * m_nax);
+    x.head(m_nax) = m_position_forced_resp.middleRows(m_nax * (m - 1), m_nax) * u +
+                    m_position_free_resp.middleRows(m_nax * (m - 1), m_nax) * x0;
+    x.tail(m_nax) = m_velocity_forced_resp.middleRows(m_nax * (m - 1), m_nax) * u +
+                    m_velocity_free_resp.middleRows(m_nax * (m - 1), m_nax) * x0.tail(m_nax);
+    return x;
+  }
 };
 
 class ThorQpIntegrationTest : public ::testing::Test
@@ -128,6 +144,7 @@ TEST_F(ThorQpIntegrationTest, ComputesOneFiniteConstrainedStep)
   config.lambda_clik = 1e+4;
   config.position_bounds = true;
   config.cbf = true;
+  config.cbf_formulation = CbfFormulation::continuous;  // rows checked below
   config.cbf_frame_ids = cbfFrameIds();
   config.n_obstacle_points = 1;
   const std::vector<unsigned int>& frame_ids = config.cbf_frame_ids;
@@ -239,6 +256,7 @@ TEST_F(ThorQpIntegrationTest, SingleIntervalCbfUsesCurrentStateAndObstacleAccele
   config.lambda_scaling = 1.0;
   config.lambda_clik = 1e+2;
   config.cbf = true;
+  config.cbf_formulation = CbfFormulation::continuous;  // rows checked below
   config.cbf_frame_ids = {static_cast<unsigned int>(model_.frames.size() - 1)};
   config.n_obstacle_points = 1;
 
@@ -310,6 +328,7 @@ TEST_F(ThorQpIntegrationTest, CbfUsesSphereRadiiAndPerObstacleDeltaH)
   config.lambda_scaling = 1.0;
   config.lambda_clik = 1e+2;
   config.cbf = true;
+  config.cbf_formulation = CbfFormulation::continuous;  // rows checked below
   config.cbf_frame_ids = {static_cast<unsigned int>(model_.getFrameId("wrist_1_link")),
                           static_cast<unsigned int>(model_.getFrameId("tool0"))};
   config.cbf_frame_radii = {0.08, 0.04};
@@ -411,37 +430,343 @@ TEST_F(ThorQpIntegrationTest, RobotAtRestInsideTheRobustBandCanMoveAway)
   config.cbf_frame_ids = {frame};
   config.n_obstacle_points = 1;
 
+  // Both formulations: the discrete one has authority through the position too.
+  for (const CbfFormulation formulation : {CbfFormulation::discrete, CbfFormulation::continuous}) {
+    SCOPED_TRACE(formulation == CbfFormulation::discrete ? "discrete" : "continuous");
+    InspectableOptimizer qp;
+    qp.setPinocchioModel(model_);
+    config.cbf_formulation = formulation;
+    ASSERT_NO_THROW(qp.configure(config));
+
+    Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
+    state.head(axes) << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0;
+    qp.setInitialState(state);
+
+    pinocchio::Data data(model_);
+    pinocchio::framesForwardKinematics(model_, data, state.head(axes));
+    const Eigen::Vector3d tool = data.oMf[frame].translation();
+    const Eigen::Vector3d direction = Eigen::Vector3d::UnitX();
+
+    ThorInput in;
+    in.target_dq = Eigen::VectorXd::Zero(axes);
+    in.next_target_q = state.head(axes);
+    in.x0 = state;
+    in.obstacle_pos = {tool + direction * (config.C + config.delta_H - 0.002)};
+    in.obstacle_vel = {Eigen::Vector3d::Zero()};
+
+    ThorOutput out;
+    ASSERT_NO_THROW(out = qp.solve(in));
+    EXPECT_NEAR(out.cbf.h_now, -0.002, 1e-9);
+    EXPECT_NEAR(out.cbf.distance, config.C + config.delta_H - 0.002, 1e-9);
+
+    // The commanded acceleration moves the tool away from the obstacle.
+    Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian =
+      Eigen::Matrix<double, 6, Eigen::Dynamic>::Zero(6, model_.nv);
+    pinocchio::computeJointJacobians(model_, data, state.head(axes));
+    pinocchio::getFrameJacobian(model_, data, frame, pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
+    EXPECT_LT(direction.dot(jacobian.topRows<3>() * out.next_acc), 0.0);
+  }
+}
+
+// The discrete-time CBF needs d(v_frame)/dq of the frame origin velocity in
+// world coordinates; the LOCAL_WORLD_ALIGNED derivatives of Pinocchio are not
+// that quantity, so frameVelocityDerivatives() builds it from the LOCAL ones.
+TEST_F(ThorQpIntegrationTest, FrameVelocityDerivativesMatchFiniteDifferences)
+{
+  const auto axes = static_cast<Eigen::Index>(model_.nv);
+  Eigen::VectorXd q(axes), dq(axes);
+  q << 0.3, -1.2, 1.4, -0.9, -1.5, 0.2;
+  dq << 0.4, -0.3, 0.5, 0.2, -0.6, 0.1;
+  const auto frame = model_.getFrameId("wrist_1_link");
+
+  pinocchio::Data data(model_);
+  auto velocity = [&](const Eigen::VectorXd& qq) {
+    pinocchio::forwardKinematics(model_, data, qq, dq);
+    pinocchio::updateFramePlacements(model_, data);
+    return Eigen::Vector3d(pinocchio::getFrameVelocity(model_, data, frame, pinocchio::LOCAL_WORLD_ALIGNED).linear());
+  };
+  Eigen::Matrix<double, 3, Eigen::Dynamic> numeric(3, axes);
+  constexpr double eps = 1e-6;
+  for (Eigen::Index i = 0; i < axes; ++i) {
+    Eigen::VectorXd e = Eigen::VectorXd::Zero(axes);
+    e(i) = eps;
+    numeric.col(i) = (velocity(q + e) - velocity(q - e)) / (2.0 * eps);
+  }
+
+  Eigen::Matrix<double, 3, Eigen::Dynamic> v_dq, v_dv;
+  pinocchio::computeForwardKinematicsDerivatives(model_, data, q, dq, Eigen::VectorXd::Zero(axes));
+  pinocchio::updateFramePlacements(model_, data);
+  frameVelocityDerivatives(model_, data, frame, v_dq, v_dv);
+  EXPECT_TRUE(v_dq.isApprox(numeric, 1e-6)) << v_dq << "\n" << numeric;
+
+  Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian = Eigen::Matrix<double, 6, Eigen::Dynamic>::Zero(6, axes);
+  pinocchio::getFrameJacobian(model_, data, frame, pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
+  EXPECT_TRUE(v_dv.isApprox(jacobian.topRows<3>(), 1e-12));
+}
+
+// Discrete-time CBF: for every interval i, robot sphere and obstacle sphere the
+// row is the linearization of F_i(u) = h(X_{i+1}(u)) - alpha_i h(X_i(u)) around
+// the previous inputs u_ref applied from the current state. Rebuild it with
+// finite differences on the nonlinear kinematics.
+TEST_F(ThorQpIntegrationTest, DiscreteCbfRowsLinearizeTheBarrierAlongTheHorizon)
+{
+  const auto axes = static_cast<unsigned int>(model_.nv);
+  constexpr unsigned int intervals = 3;
+  ThorConfig config = baseConfig(intervals, 0.06, 0.01, false);
+  config.C = 0.05;
+  config.gamma = 3.0;
+  config.qmax = constant(2.0 * kPi);
+  config.qmin = constant(-2.0 * kPi);
+  config.Dqmax = constant(3.0);
+  config.DDqmax = constant(20.0);
+  config.lambda_acc = 1e-4;
+  config.lambda_scaling = 1.0;
+  config.lambda_clik = 1e+2;
+  config.cbf = true;
+  config.cbf_formulation = CbfFormulation::discrete;
+  config.cbf_frame_ids = {static_cast<unsigned int>(model_.getFrameId("wrist_1_link")),
+                          static_cast<unsigned int>(model_.getFrameId("tool0"))};
+  config.cbf_frame_radii = {0.06, 0.05};
+  config.n_obstacle_points = 2;
+
   InspectableOptimizer qp;
   qp.setPinocchioModel(model_);
   ASSERT_NO_THROW(qp.configure(config));
 
-  Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
-  state.head(axes) << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0;
+  Eigen::VectorXd state(2 * axes);
+  state << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0,
+           0.5, 0.1, -0.2, 0.0, 0.0, 0.0;
   qp.setInitialState(state);
 
-  pinocchio::Data data(model_);
-  pinocchio::framesForwardKinematics(model_, data, state.head(axes));
-  const Eigen::Vector3d tool = data.oMf[frame].translation();
-  const Eigen::Vector3d direction = Eigen::Vector3d::UnitX();
-
   ThorInput in;
-  in.target_dq = Eigen::VectorXd::Zero(axes);
+  in.target_dq = Eigen::VectorXd::Zero(axes * intervals);
+  for (unsigned int i = 0; i < intervals; ++i)
+    in.target_dq(i * axes) = 0.5;
   in.next_target_q = state.head(axes);
   in.x0 = state;
-  in.obstacle_pos = {tool + direction * (config.C + config.delta_H - 0.002)};
-  in.obstacle_vel = {Eigen::Vector3d::Zero()};
+  // Two obstacles approaching the arm, one of them decelerating.
+  in.obstacle_pos = {Eigen::Vector3d(0.6, 0.9, 0.7), Eigen::Vector3d(1.2, 0.3, 0.6)};
+  in.obstacle_vel = {Eigen::Vector3d(0.0, -0.6, 0.0), Eigen::Vector3d(-0.5, 0.0, 0.0)};
+  in.obstacle_acc = {Eigen::Vector3d::Zero(), Eigen::Vector3d(0.8, 0.0, 0.0)};
+  in.obstacle_radius = {0.1, 0.2};
+  in.obstacle_delta_H = {0.02, 0.05};
 
+  // A first solve gives the previous inputs u_ref used to linearize the second.
   ThorOutput out;
   ASSERT_NO_THROW(out = qp.solve(in));
-  EXPECT_NEAR(out.cbf.h_min, -0.002, 1e-9);
-  EXPECT_NEAR(out.cbf.distance, config.C + config.delta_H - 0.002, 1e-9);
+  qp.updateState(out.next_acc);
+  in.x0 = qp.getState();
+  const Eigen::Index n_u = static_cast<Eigen::Index>(axes) * intervals;
+  const Eigen::VectorXd u_ref = qp.solution().head(n_u);
+  ASSERT_GT(u_ref.norm(), 1e-6);
+  ASSERT_NO_THROW(out = qp.solve(in));
 
-  // The commanded acceleration moves the tool away from the obstacle.
-  Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian =
-    Eigen::Matrix<double, 6, Eigen::Dynamic>::Zero(6, model_.nv);
-  pinocchio::computeJointJacobians(model_, data, state.head(axes));
-  pinocchio::getFrameJacobian(model_, data, frame, pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
-  EXPECT_LT(direction.dot(jacobian.topRows<3>() * out.next_acc), 0.0);
+  const Eigen::VectorXd prediction_time = qp.getPredictionTimeInstant();
+  pinocchio::Data data(model_);
+  auto barrier = [&](const Eigen::VectorXd& u, unsigned int m, std::size_t j, std::size_t k) {
+    const Eigen::VectorXd x = qp.node(in.x0, u, m);
+    pinocchio::forwardKinematics(model_, data, x.head(axes), x.tail(axes));
+    pinocchio::updateFramePlacements(model_, data);
+    const unsigned int frame = config.cbf_frame_ids[j];
+    const double t = m == 0 ? 0.0 : prediction_time(m - 1);
+    const Eigen::Vector3d& a_o = in.obstacle_acc[k];
+    return cbf::barrierTerms(
+      data.oMf[frame].translation(),
+      pinocchio::getFrameVelocity(model_, data, frame, pinocchio::LOCAL_WORLD_ALIGNED).linear(),
+      in.obstacle_pos[k] + in.obstacle_vel[k] * t + 0.5 * a_o * t * t, in.obstacle_vel[k] + a_o * t, a_o,
+      config.T_r, config.a_s, config.C,
+      config.cbf_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k]).h;
+  };
+
+  double h_now = std::numeric_limits<double>::infinity();
+  const Eigen::Index n_cols = qp.inequalities().cols();
+  for (std::size_t j = 0; j < 2; ++j) {
+    for (std::size_t k = 0; k < 2; ++k) {
+      h_now = std::min(h_now, barrier(u_ref, 0, j, k));
+      for (unsigned int i = 0; i < intervals; ++i) {
+        SCOPED_TRACE(::testing::Message() << "frame " << j << " obstacle " << k << " interval " << i);
+        const double alpha = std::max(0.0, 1.0 - config.gamma * qp.controlIntervals()(i));
+        auto F = [&](const Eigen::VectorXd& u) { return barrier(u, i + 1, j, k) - alpha * barrier(u, i, j, k); };
+
+        Eigen::VectorXd gradient(n_u);
+        constexpr double eps = 1e-4;
+        for (Eigen::Index n = 0; n < n_u; ++n) {
+          Eigen::VectorXd e = Eigen::VectorXd::Zero(n_u);
+          e(n) = eps;
+          gradient(n) = (F(u_ref + e) - F(u_ref - e)) / (2.0 * eps);
+        }
+
+        const Eigen::Index col = n_cols - static_cast<Eigen::Index>(2 * (intervals * (j + 1) - i) - k);
+        const Eigen::VectorXd row = qp.inequalities().col(col);
+        EXPECT_TRUE(row.head(n_u).isApprox(gradient, 1e-5)) << row.head(n_u).transpose() << "\n" << gradient.transpose();
+        EXPECT_TRUE(row.tail(intervals).isZero());
+        EXPECT_NEAR(row.head(n_u).dot(u_ref) + qp.solvedOffsets()(col), F(u_ref), 1e-9);
+
+        // The solution satisfies the linearized row, and on the first interval
+        // (one control period ahead) the nonlinear condition too.
+        const Eigen::VectorXd u = qp.solution().head(n_u);
+        EXPECT_GE(row.head(n_u).dot(u) + qp.solvedOffsets()(col), -1e-7);
+        if (i == 0)
+          EXPECT_GE(F(u), -1e-6);
+      }
+    }
+  }
+  EXPECT_NEAR(out.cbf.h_now, h_now, 1e-12);
+}
+
+// Repeated linearization: with cbf_linearizations = 2 the second QP linearizes
+// the discrete CBF around the plan of the first one (moved by the damping),
+// obtained from a twin optimizer with a single linearization. Also checks the
+// early stop and the validation of the settings.
+TEST_F(ThorQpIntegrationTest, RepeatedLinearizationUsesThePlanOfThePreviousQp)
+{
+  const auto axes = static_cast<unsigned int>(model_.nv);
+  constexpr unsigned int intervals = 3;
+  ThorConfig config = baseConfig(intervals, 0.06, 0.01, false);
+  config.C = 0.05;
+  config.gamma = 3.0;
+  config.qmax = constant(2.0 * kPi);
+  config.qmin = constant(-2.0 * kPi);
+  config.Dqmax = constant(3.0);
+  config.DDqmax = constant(20.0);
+  config.lambda_acc = 1e-4;
+  config.lambda_scaling = 1.0;
+  config.lambda_clik = 1e+2;
+  config.cbf = true;
+  config.cbf_frame_ids = {static_cast<unsigned int>(model_.getFrameId("wrist_1_link")),
+                          static_cast<unsigned int>(model_.getFrameId("tool0"))};
+  config.cbf_frame_radii = {0.06, 0.05};
+  config.n_obstacle_points = 2;
+
+  config.cbf_linearizations = 0;
+  EXPECT_THROW(ThorQP(config, model_), std::invalid_argument);
+  config.cbf_linearizations = 2;
+  for (const double damping : {0.0, 1.5}) {
+    config.cbf_linearization_damping = damping;
+    EXPECT_THROW(ThorQP(config, model_), std::invalid_argument);
+  }
+  config.cbf_linearization_damping = 1.0;
+  config.cbf_linearization_tolerance = -1.0;
+  EXPECT_THROW(ThorQP(config, model_), std::invalid_argument);
+  config.cbf_linearization_tolerance = 0.0;
+
+  // Full and damped steps of the linearization point.
+  for (const double damping : {1.0, 0.5}) {
+    SCOPED_TRACE(::testing::Message() << "damping " << damping);
+    InspectableOptimizer qp;
+    qp.setPinocchioModel(model_);
+    config.cbf_linearizations = 2;
+    config.cbf_linearization_tolerance = 0.0;
+    config.cbf_linearization_damping = damping;
+    ASSERT_NO_THROW(qp.configure(config));
+
+    Eigen::VectorXd state(2 * axes);
+    state << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0,
+             0.5, 0.1, -0.2, 0.0, 0.0, 0.0;
+    qp.setInitialState(state);
+
+    ThorInput in;
+    in.target_dq = Eigen::VectorXd::Zero(axes * intervals);
+    for (unsigned int i = 0; i < intervals; ++i)
+      in.target_dq(i * axes) = 0.5;
+    in.next_target_q = state.head(axes);
+    in.x0 = state;
+    in.obstacle_pos = {Eigen::Vector3d(0.6, 0.9, 0.7), Eigen::Vector3d(1.2, 0.3, 0.6)};
+    in.obstacle_vel = {Eigen::Vector3d(0.0, -0.6, 0.0), Eigen::Vector3d(-0.5, 0.0, 0.0)};
+    in.obstacle_acc = {Eigen::Vector3d::Zero(), Eigen::Vector3d(0.8, 0.0, 0.0)};
+    in.obstacle_radius = {0.1, 0.2};
+    in.obstacle_delta_H = {0.02, 0.05};
+
+    ThorOutput out;
+    ASSERT_NO_THROW(out = qp.solve(in));
+    EXPECT_EQ(out.cbf_linearizations, 2U);
+    qp.updateState(out.next_acc);
+    in.x0 = qp.getState();
+
+    // A twin with a single linearization, the same state and the same previous
+    // solution u_prev solves only the first QP of this cycle, of solution u_1.
+    // The second QP of qp is linearized around u_prev + damping (u_1 - u_prev).
+    const Eigen::Index n_u = static_cast<Eigen::Index>(axes) * intervals;
+    const Eigen::VectorXd u_prev = qp.solution().head(n_u);
+    ThorConfig single = config;
+    single.cbf_linearizations = 1;
+    ThorOutput first;
+    InspectableOptimizer one;
+    one.setPinocchioModel(model_);
+    ASSERT_NO_THROW(one.configure(single));
+    one.setInitialState(in.x0);
+    one.setSolution(qp.solution());
+    ASSERT_NO_THROW(first = one.solve(in));
+    EXPECT_EQ(first.cbf_linearizations, 1U);
+    const Eigen::VectorXd u_ref = u_prev + damping * (one.solution().head(n_u) - u_prev);
+
+    ASSERT_NO_THROW(out = qp.solve(in));
+    EXPECT_EQ(out.cbf_linearizations, 2U);
+
+    const Eigen::VectorXd prediction_time = qp.getPredictionTimeInstant();
+    pinocchio::Data data(model_);
+    auto barrier = [&](const Eigen::VectorXd& u, unsigned int m, std::size_t j, std::size_t k) {
+      const Eigen::VectorXd x = qp.node(in.x0, u, m);
+      pinocchio::forwardKinematics(model_, data, x.head(axes), x.tail(axes));
+      pinocchio::updateFramePlacements(model_, data);
+      const unsigned int frame = config.cbf_frame_ids[j];
+      const double t = m == 0 ? 0.0 : prediction_time(m - 1);
+      const Eigen::Vector3d& a_o = in.obstacle_acc[k];
+      return cbf::barrierTerms(
+        data.oMf[frame].translation(),
+        pinocchio::getFrameVelocity(model_, data, frame, pinocchio::LOCAL_WORLD_ALIGNED).linear(),
+        in.obstacle_pos[k] + in.obstacle_vel[k] * t + 0.5 * a_o * t * t, in.obstacle_vel[k] + a_o * t, a_o,
+        config.T_r, config.a_s, config.C,
+        config.cbf_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k]).h;
+    };
+
+    const Eigen::Index n_cols = qp.inequalities().cols();
+    for (std::size_t j = 0; j < 2; ++j) {
+      for (std::size_t k = 0; k < 2; ++k) {
+        for (unsigned int i = 0; i < intervals; ++i) {
+          SCOPED_TRACE(::testing::Message() << "frame " << j << " obstacle " << k << " interval " << i);
+          const double alpha = std::max(0.0, 1.0 - config.gamma * qp.controlIntervals()(i));
+          auto F = [&](const Eigen::VectorXd& u) { return barrier(u, i + 1, j, k) - alpha * barrier(u, i, j, k); };
+          Eigen::VectorXd gradient(n_u);
+          constexpr double eps = 1e-4;
+          for (Eigen::Index n = 0; n < n_u; ++n) {
+            Eigen::VectorXd e = Eigen::VectorXd::Zero(n_u);
+            e(n) = eps;
+            gradient(n) = (F(u_ref + e) - F(u_ref - e)) / (2.0 * eps);
+          }
+          const Eigen::Index col = n_cols - static_cast<Eigen::Index>(2 * (intervals * (j + 1) - i) - k);
+          const Eigen::VectorXd row = qp.inequalities().col(col);
+          EXPECT_TRUE(row.head(n_u).isApprox(gradient, 1e-5));
+          EXPECT_NEAR(row.head(n_u).dot(u_ref) + qp.solvedOffsets()(col), F(u_ref), 1e-9);
+        }
+      }
+    }
+
+    // With every obstacle beyond the activation distance there is nothing to
+    // re-linearize: a single QP is solved.
+    config.cbf_linearizations = 3;
+    ASSERT_NO_THROW(qp.configure(config));
+    qp.setInitialState(state);
+    in.x0 = state;
+    ThorInput far = in;
+    far.obstacle_pos = {Eigen::Vector3d(100.0, 100.0, 100.0), Eigen::Vector3d(100.0, 100.0, 100.0)};
+    ASSERT_NO_THROW(out = qp.solve(far));
+    EXPECT_EQ(out.cbf_linearizations, 1U);
+
+    // Early stop: a huge tolerance accepts the first QP, a zero one runs them all
+    // (unless two solutions are identical).
+    config.cbf_linearization_tolerance = 1e9;
+    ASSERT_NO_THROW(qp.configure(config));
+    qp.setInitialState(state);
+    ASSERT_NO_THROW(out = qp.solve(in));
+    EXPECT_EQ(out.cbf_linearizations, 1U);
+    EXPECT_GT(out.cbf_linearization_step, 0.0);
+    config.cbf_linearization_tolerance = 0.0;
+    ASSERT_NO_THROW(qp.configure(config));
+    qp.setInitialState(state);
+    ASSERT_NO_THROW(out = qp.solve(in));
+    EXPECT_EQ(out.cbf_linearizations, 3U);
+  }
 }
 
 TEST_F(ThorQpIntegrationTest, ComputesConstrainedStepWithoutCbf)

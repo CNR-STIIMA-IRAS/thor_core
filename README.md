@@ -39,13 +39,15 @@ cmake --build build/thor_math -j
 
 ## Example
 
-[thor_math/examples/cbf_mpc_example.cpp](thor_math/examples/cbf_mpc_example.cpp) runs the MPC with the control barrier function on a UR10 covered by spheres, among a walking person (torso and hand spheres) and a static fixture. Run it again with `--no-cbf` to compare:
+[thor_math/examples/cbf_mpc_example.cpp](thor_math/examples/cbf_mpc_example.cpp) runs the MPC with the control barrier function on a UR10 covered by spheres, among a walking person (torso and hand spheres) and a static fixture. Run it again with `--no-cbf` to compare, or with `--continuous-cbf` to use the continuous-time CBF of the paper instead of the discrete-time one along the horizon:
 
 ```bash
 cmake -S thor_math -B build/thor_math -DBUILD_EXAMPLES=ON
 cmake --build build/thor_math -j
 ./build/thor_math/thor_math_cbf_mpc_example
 ./build/thor_math/thor_math_cbf_mpc_example --no-cbf
+./build/thor_math/thor_math_cbf_mpc_example --continuous-cbf
+./build/thor_math/thor_math_cbf_mpc_example --linearizations 4 --damping 0.7 --tolerance 0.5
 ```
 
 ## Documentation

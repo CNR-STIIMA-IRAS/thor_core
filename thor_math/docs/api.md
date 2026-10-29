@@ -195,24 +195,134 @@ every robot sphere `j` and obstacle sphere `k`:
   if the robot reacts after `T_r` and then brakes at `a_s`, while the
   obstacle keeps its acceleration (section 5). `C` is the safety margin
   between the surfaces. The safe set is `h >= 0`.
-- **Condition.** Imposed at the start of interval `i`:
-
-  ```
-  L_g h (J u_i + dJ dq) + L_f h + gamma h >= 0
-  ```
-
-  `L_f h` and `L_g h` are the Lie derivatives of `h` (`cbf::barrierTerms()`);
-  `J u_i + dJ dq` is the acceleration of the frame. Radii and `delta_H` are
-  constant, so the Lie derivatives are the same as for points.
-- **Robot state per interval.** For `i = 0` it is the current state `x0`. For
-  `i > 0` it is the state at `t_{i-1}` of the previous prediction, which
-  `solve()` stores. With `n_intervals = 1` the constraint is the one-step
-  controller of the paper.
-- **Obstacle prediction.** The obstacle centers are extrapolated to the start
-  of each interval with constant acceleration.
+- **Condition.** One row for every interval `i`, robot sphere and obstacle
+  sphere. `ThorConfig::cbf_formulation` selects how it is written; the two
+  formulations are described below.
+- **Obstacle prediction.** The obstacle centers are extrapolated to each
+  prediction time with constant acceleration.
 - **Activation distance.** If the lowest `h` over the horizon is above
   `cbf_activation_distance`, the CBF rows are dropped from the QP: the
   solution is the same, and the QP is smaller.
+
+Let `X_0 = x0` be the current state and `X_{i+1}` the predicted state at the
+end of interval `i`, of duration `dt_i`.
+
+#### Discrete formulation (`CbfFormulation::discrete`, default)
+
+```
+h(X_{i+1}) >= alpha_i h(X_i),     alpha_i = max(0, 1 - gamma dt_i)
+```
+
+- **Meaning.** `h` stays non-negative at every predicted state. When it is
+  negative, it recovers at least geometrically. The clamp at 0 keeps
+  `h(X_{i+1}) >= 0` when `gamma dt_i > 1`.
+- **Linearization.** `h(X_m)` is linearized around a reference trajectory:
+  the inputs of the previous solution applied from the current state. Each
+  row depends on all the accelerations `u_0 ... u_i`:
+
+  ```
+  h(X_m(u)) ≈ h(X̄_m) + G_m (u - u_ref)
+  G_m = (grad_p^T J + lie_g^T dv/dq) dq_m/du + lie_g^T J ddq_m/du
+  ```
+
+  - `grad_p` and `lie_g` are the gradients of `h` with respect to the robot
+    center position and velocity (`cbf::barrierTerms()`).
+  - `dv/dq` comes from `frameVelocityDerivatives()`.
+  - `h(X_0)` is exact.
+- **Accuracy.** On the first interval the linearization is exact to first
+  order in one control period. On the longer intervals of the horizon the
+  error grows with the distance between the new plan and the reference.
+- **Cost.** It takes one kinematics evaluation more per cycle than the
+  continuous formulation. The rows are dense in `u`.
+
+#### Continuous formulation (`CbfFormulation::continuous`)
+
+```
+L_g h (J u_i + dJ dq) + L_f h + gamma h >= 0
+```
+
+- **Where it is imposed.** At the start of interval `i`: on the current
+  state for `i = 0`, and for `i > 0` on the state at `t_{i-1}` of the
+  previous prediction, which `solve()` stores.
+- **Terms.** `L_f h` and `L_g h` are the Lie derivatives of `h`;
+  `J u_i + dJ dq` is the acceleration of the frame. Radii and `delta_H` are
+  constant, so the Lie derivatives are the same as for points.
+- **Relation to the paper.** With `n_intervals = 1` this is the one-step
+  controller of the paper.
+- **Limitation.** It constrains only the rate of `h` at one instant per
+  interval. Along the long intervals of the horizon the predicted `h` can
+  become strongly negative even when the executed motion is safe.
+
+#### Repeated linearization (`cbf_linearizations`)
+
+Every cycle solves up to `N = cbf_linearizations` QPs. The CBF is linearized
+around reference inputs `u_ref`:
+
+```
+u_ref = solution of the previous cycle
+for k = 1 … N:
+    u* = QP(CBF linearized around u_ref)
+    stop if k == N, if the CBF rows are inactive,
+         or if |u* - u_ref|_inf <= cbf_linearization_tolerance
+    u_ref = u_ref + cbf_linearization_damping · (u* - u_ref)
+command = u* of the last QP solved
+```
+
+- **What is reported.** `ThorOutput::cbf_linearizations` is the number of
+  QPs solved; `ThorOutput::cbf_linearization_step` is the last
+  `|u* - u_ref|_inf` [rad/s²], useful to tune the tolerance.
+- **Failures.** If a QP after the first is infeasible, the solution of the
+  previous one is kept: it satisfies its own linearization.
+- **Why the command is never damped.** Only the linearization point is
+  damped. The command is always a QP solution, so it satisfies the
+  constraints of its own linearization.
+- **When `N = 1` is enough.** `N = 1` (default) is enough for safety,
+  because the executed interval is linearized over one control period only.
+  A larger `N` makes the predicted barrier follow the nonlinear one along the
+  long intervals of the horizon.
+
+Measured on the example scene (3000 cycles; lowest nonlinear `h` along the
+plan of each cycle):
+
+| `N` | damping | tolerance [rad/s²] | lowest `h` along the plan | cycles with `h < -1 cm` | QPs per cycle | mean / max solve time |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | – | – | -0.040 m | 53 | 1.00 | 114 / 210 µs |
+| 2 | 1 | 0 | -0.027 m | 6 | 2.00 | 236 / 680 µs |
+| 3 | 1 | 0 | -0.027 m | 28 | 2.92 | 331 / 800 µs |
+| 6 | 1 | 0 | -0.027 m | 50 | 5.16 | 560 / 1210 µs |
+| 6 | 0.7 | 0 | -0.010 m | 0 | 6.00 | 643 / 1030 µs |
+| 6 | 0.7 | 0.1 | -0.010 m | 0 | 1.89 | 218 / 910 µs |
+| 4 | 0.7 | 0.5 | -0.001 m | 0 | 1.25 | 144 / 635 µs |
+
+- **Full steps oscillate.** With `damping = 1` more linearizations can make
+  the plan worse (`N = 6` is worse than `N = 2`), because the linearization
+  point jumps back and forth.
+- **Damping stabilizes large `N`.** With `damping = 0.7`, `N = 6` has no
+  cycle below -1 cm. The trend is not monotonic in `N`, though.
+- **The early stop makes it affordable.** Far from the obstacles a second
+  QP changes little and the cycle stops after one or two QPs. The mean cost
+  falls to that of `N = 1`–`2`, while the critical cycles still get up to
+  `N` QPs.
+- **Size the real-time budget on the maximum, not the mean.** The early stop
+  does not lower the worst case, which is `N` QPs per cycle.
+- **These numbers come from one scene.** Use them as a starting point
+  (`N = 4`, `damping = 0.7`, `tolerance = 0.5`), not as a general tuning.
+
+With the continuous formulation, re-linearizing does not help: with `N = 2`
+the lowest `h` along the plan is still -1.04 m, because that formulation
+only constrains the rate of `h`.
+
+#### Comparison
+
+On the example scene (5 robot spheres, 3 obstacle spheres, 5 intervals over
+0.2 s), the executed motion is equally safe with both formulations. The
+difference is in the plan, measured as the nonlinear `h` along the predicted
+states of the new solution over 3000 cycles:
+
+| | lowest `h` along the plan | cycles with `h < -1 cm` | mean solve time |
+| --- | --- | --- | --- |
+| continuous | -1.19 m | 254 | ~80 µs |
+| discrete | -0.04 m | 53 | ~110 µs |
 
 ---
 
@@ -255,9 +365,11 @@ and the last solution.
 
 **Cost per cycle.** It grows with
 `n_intervals * (n_joints + 1)` variables and with
-`n_intervals * robot spheres * obstacle spheres` CBF rows; there is one kinematics
-evaluation per interval. With 6 joints, 5 intervals, 5 frames and 2 points,
-a solve takes about 50–150 µs in Release builds (see the example).
+`n_intervals * robot spheres * obstacle spheres` CBF rows. There is one
+kinematics evaluation per interval (continuous) or per interval plus one
+(discrete), times `cbf_linearizations`. With 6 joints, 5 intervals, 5 robot
+spheres and 3 obstacle spheres, a solve takes about 80–150 µs in Release
+builds with one linearization (see the example).
 
 ---
 
@@ -286,6 +398,10 @@ Settings applied by `ThorQP::configure()`. Vectors have size `n_joints`.
 | `position_bounds` | false | position and invariance constraints | |
 | `min_scaling`, `max_scaling` | 0.05, 1.01 | bounds of `s_i` | `min <= max` |
 | `cbf` | false | enables the CBF | model `nq == nv == n_joints` |
+| `cbf_formulation` | `discrete` | `CbfFormulation::discrete` or `continuous` (section 2.6) | |
+| `cbf_linearizations` | 1 | maximum QPs per cycle, each re-linearizing the CBF around the previous plan (section 2.6) | >= 1 (CBF) |
+| `cbf_linearization_damping` | 1 | step of the linearization point towards each new solution | in (0, 1] (CBF) |
+| `cbf_linearization_tolerance` | 0 | stop re-linearizing when the solution changes by at most this value [rad/s²]; 0 never stops early | >= 0 (CBF) |
 | `a_s` | 0 | robot braking deceleration [m/s²] | > 0 (CBF) |
 | `T_r` | 0 | reaction time [s] | >= 0 (CBF) |
 | `C` | 0 | safety margin [m] | > 0 (CBF) |
@@ -321,19 +437,25 @@ around). Only the first `n_obstacle_points` spheres are used.
 | --- | --- |
 | `next_acc` | joint accelerations for the next control period |
 | `next_scaling` | time scaling of the first interval |
-| `cbf` | `CbfDiagnostics` of the most critical pair (CBF enabled) |
+| `cbf` | `CbfDiagnostics` of the most critical pair (CBF enabled), from the last linearization |
+| `cbf_linearizations` | QPs solved successfully in this cycle: 1 without CBF, up to `ThorConfig::cbf_linearizations` with it |
+| `cbf_linearization_step` | last `\|u* - u_ref\|_inf` [rad/s²] between a solution and its linearization point; 0 with a single QP |
 
 ### 4.4 `struct CbfDiagnostics`
 
-The robot-obstacle pair with the lowest `h` over the horizon. All fields are 0
-with the CBF disabled. For intervals after the first, `h` is computed on the
-previous prediction, so `h_min` can be briefly negative even when the actual
-motion is safe.
+The robot-obstacle pair with the lowest `h` over the horizon, and the lowest
+`h` on the current state. All fields are 0 with the CBF disabled.
+
+The predicted states are the linearization points of the CBF: the reference
+trajectory (discrete) or the previous prediction (continuous), not the new
+solution. `h_min` can therefore be negative even when the executed motion is
+safe; `h_now` is the actual margin.
 
 | Field | Meaning |
 | --- | --- |
-| `h_min` | lowest barrier value [m] |
-| `interval` | control interval |
+| `h_now` | lowest barrier value on the current state [m] |
+| `h_min` | lowest barrier value over the horizon [m] |
+| `interval` | prediction node of `h_min`: 0 current state, `i` start of interval `i`, `n_intervals` end of the horizon (discrete only) |
 | `frame_id` | Pinocchio frame id (`model.frames[frame_id].name`) |
 | `distance` | distance `d` [m] |
 | `v_robot` | robot velocity along `(p_r - p_o)/\|p_r - p_o\|` [m/s], negative when approaching |
@@ -385,6 +507,13 @@ useful on their own. The state of `nax` joints is `[q; dq]`.
 | `splitResponses(free, vel_free, pos_free, forced, vel_forced, pos_forced, nax)` | separates position and velocity rows; `vel_free` multiplies `dq0` only |
 | `quadraticControlIntervals(T, nc, first, intervals, pred_time)` | quadratically growing intervals |
 | `constantControlIntervals(T, nc, dt, intervals, pred_time)` | equal intervals, multiple of `dt` |
+
+`frameVelocityDerivatives(model, data, frame, dv_dq, dv_ddq)` returns the
+Jacobians of the velocity of a frame origin in world coordinates with respect
+to `q` and `dq`. It needs `pinocchio::computeForwardKinematicsDerivatives()`
+and `updateFramePlacements()`. The linear rows that Pinocchio returns for
+`LOCAL_WORLD_ALIGNED` are not this derivative, so it is built from the
+`LOCAL` ones: `dv/dq_i = R dv_local/dq_i + omega_i × v`.
 
 ---
 
@@ -493,8 +622,12 @@ The kernels in `cbf.h` reproduce its values to 1e-12. The differences are:
 
 - **MPC instead of one step.** `cbf_python` solves one control period with the
   acceleration of the time scaling as input. `ThorQP` keeps its multi-interval
-  MPC with the time scaling as a decision variable. It imposes the CBF on every
-  interval; with `n_intervals = 1`, the CBF row is the same.
+  MPC with the time scaling as a decision variable, and imposes the CBF on
+  every interval.
+  - By default it uses the discrete-time formulation, which constrains the
+    barrier at the predicted states.
+  - The continuous formulation is the CBF of the paper; with
+    `n_intervals = 1` the CBF row is the same.
 - **Robust term.** The paper and `cbf_python` add `+ h_chi delta_H` to the
   condition, which relaxes it and adds metres to metres per second. `ThorQP`
   evaluates the barrier at the worst-case distance `d - delta_H` (the obstacle

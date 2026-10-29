@@ -62,6 +62,7 @@
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/kinematics-derivatives.hpp>
+#include <pinocchio/algorithm/frames-derivatives.hpp>
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
@@ -202,6 +203,55 @@ bool constantControlIntervals ( const double& control_horizon_time, const unsign
 
 /// @}
 
+/**
+ * @brief Jacobians of the velocity of a frame origin, in world coordinates.
+ *
+ * With `v = J(q) dq` the velocity of the origin of @p frame_id in world
+ * coordinates (the linear part of the LOCAL_WORLD_ALIGNED frame velocity):
+ * - @p dv_ddq `= dv/ddq = J`, the linear frame Jacobian;
+ * - @p dv_dq  `= dv/dq`, from the LOCAL derivatives as
+ *   `dv/dq_i = R dv_local/dq_i + omega_i x v`, with `omega_i` the angular
+ *   Jacobian column in world coordinates. The linear rows returned by
+ *   Pinocchio for LOCAL_WORLD_ALIGNED are not this derivative.
+ *
+ * pinocchio::computeForwardKinematicsDerivatives() and
+ * pinocchio::updateFramePlacements() must have been called for `(q, dq)`.
+ *
+ * @param model, data  Pinocchio model and data.
+ * @param frame_id     frame index.
+ * @param[out] dv_dq   `3 x nv` matrix.
+ * @param[out] dv_ddq  `3 x nv` matrix.
+ */
+void frameVelocityDerivatives( const pinocchio::Model& model, pinocchio::Data& data,
+                               pinocchio::FrameIndex frame_id,
+                               Eigen::Matrix<double, 3, Eigen::Dynamic>& dv_dq,
+                               Eigen::Matrix<double, 3, Eigen::Dynamic>& dv_ddq );
+
+
+/**
+ * @brief How the CBF is imposed along the horizon (see docs/api.md).
+ *
+ * Both are written for every robot sphere, obstacle sphere and control
+ * interval `i`. `X_0` is the current state and `X_{i+1}` the predicted state
+ * at the end of interval `i`.
+ */
+enum class CbfFormulation
+{
+  /**
+   * `h(X_{i+1}) >= alpha_i h(X_i)`, `alpha_i = max(0, 1 - gamma dt_i)`, with
+   * `h` linearized around the trajectory obtained by applying the previous
+   * solution from the current state. It constrains the barrier at every
+   * predicted state and accounts for the length of each interval.
+   */
+  discrete,
+  /**
+   * `L_g h (J u_i + dJ dq) + L_f h + gamma h >= 0` at the start of interval
+   * `i`, on the current state for `i = 0` and on the previous prediction for
+   * `i > 0`. It constrains only the rate of `h`; with `n_intervals = 1` it is
+   * the one-step controller of the paper.
+   */
+  continuous
+};
 
 /**
  * @brief Settings of ThorQP that change rarely.
@@ -248,6 +298,10 @@ struct ThorConfig
   /// ThorInput::obstacle_pos; the barrier uses the distance between surfaces.
   /// @{
   bool   cbf     = false;  ///< Enables the CBF constraints. Needs a Pinocchio model with `nq == nv == n_joints`.
+  CbfFormulation cbf_formulation = CbfFormulation::discrete;  ///< How the CBF is imposed along the horizon.
+  unsigned int cbf_linearizations = 1;  ///< Maximum QPs solved per cycle (>= 1). 1 linearizes the CBF around the previous cycle; `N > 1` re-linearizes up to `N - 1` more times around the plan just found, reducing the linearization error on the long intervals at up to `N` times the solve cost.
+  double cbf_linearization_damping = 1.0;    ///< Step of the linearization point towards each new solution, in (0, 1]: `u_ref <- u_ref + damping (u* - u_ref)`. 1 is the full step; smaller values damp oscillations between linearizations.
+  double cbf_linearization_tolerance = 0.0;  ///< Stop re-linearizing when `|u* - u_ref|_inf` is not above this value [rad/s^2] (>= 0); 0 never stops early.
   double a_s     = 0.0;    ///< Robot braking deceleration in the `d_min` formula [m/s^2] (> 0).
   double T_r     = 0.0;    ///< Reaction time before braking [s] (>= 0).
   double C       = 0.0;    ///< Safety margin `C_0` between the robot and obstacle surfaces [m] (> 0).
@@ -292,12 +346,17 @@ struct ThorInput
 /**
  * @brief Robot-obstacle pair with the lowest barrier value over the horizon.
  *
- * All fields are zero when the CBF is disabled.
+ * Barrier values are at the worst-case distance. The states after the current
+ * one are the linearization points of the CBF: the previous solution applied
+ * from the current state (CbfFormulation::discrete) or the previous prediction
+ * (CbfFormulation::continuous), not the new solution. All fields are zero when
+ * the CBF is disabled.
  */
 struct CbfDiagnostics
 {
-  double       h_min          = 0.0;  ///< Lowest barrier value [m], at the worst-case distance. For intervals after the first it is computed on the previous prediction and can be negative even if the actual motion is safe.
-  unsigned int interval       = 0;    ///< Control interval where it occurs.
+  double       h_now          = 0.0;  ///< Lowest barrier value on the current state [m]: the actual safety margin.
+  double       h_min          = 0.0;  ///< Lowest barrier value over the horizon [m]; it can be negative on predicted states even if the actual motion is safe.
+  unsigned int interval       = 0;    ///< Prediction node of #h_min: 0 is the current state, `i` the start of interval `i`, `n_intervals` the end of the horizon (discrete only).
   unsigned int frame_id       = 0;    ///< Pinocchio frame id of the robot sphere.
   double       distance       = 0.0;  ///< Estimated distance between the robot and obstacle surfaces [m], not reduced by delta_H (negative if they overlap).
   double       v_robot        = 0.0;  ///< Robot velocity along `(p_r - p_o)/|p_r - p_o|` [m/s]; negative when approaching.
@@ -310,7 +369,9 @@ struct ThorOutput
 {
   Eigen::VectorXd next_acc;            ///< Joint accelerations to apply during the next control period, size `n_joints`.
   double          next_scaling = 0.0;  ///< Time scaling of the first interval: advance the trajectory time by `next_scaling * dt`.
-  CbfDiagnostics  cbf;                 ///< Most critical robot-obstacle pair (CBF enabled only).
+  CbfDiagnostics  cbf;                 ///< Most critical robot-obstacle pair (CBF enabled only), from the last linearization.
+  unsigned int    cbf_linearizations = 0;  ///< QPs solved successfully in this cycle: 1 without CBF, up to ThorConfig::cbf_linearizations with it (fewer if a later QP failed, the iteration converged or the CBF rows were inactive).
+  double          cbf_linearization_step = 0.0;  ///< Last `|u* - u_ref|_inf` [rad/s^2] between a solution and its linearization point; 0 with a single QP.
 };
 
 
@@ -426,6 +487,12 @@ class ThorQP
     int                m_n_obstacle_points; // number of obstacle points considered
     std::vector<unsigned int> m_frameIds;
     std::vector<double> m_frame_radii;    // robot sphere radii, one per frame
+    CbfFormulation     m_cbf_formulation = CbfFormulation::discrete;
+    unsigned int       m_cbf_linearizations = 1;
+    double             m_cbf_linearization_damping = 1.0;
+    double             m_cbf_linearization_tolerance = 0.0;
+    Eigen::VectorXd    m_cbf_reference;   // inputs around which the discrete CBF is linearized
+    Eigen::VectorXd    m_ci0_solved;      // inequality offsets of the last solve, CBF rows included
     /// @endcond
 
     /**
@@ -448,6 +515,18 @@ class ThorQP
      * @throws std::runtime_error if the problem is infeasible.
      */
     virtual void doSolve( const ThorInput& in, ThorOutput& out );
+
+    /**
+     * @brief Fills the CBF columns of `m_CI` and their offsets in @p ci0 with
+     *        the CbfFormulation::discrete constraints, and the diagnostics.
+     * @param in   validated, completed inputs (see doSolve()).
+     * @param ci0  inequality offsets of this cycle.
+     * @param diag barrier diagnostics.
+     */
+    void buildDiscreteCbf( const ThorInput& in, Eigen::VectorXd& ci0, CbfDiagnostics& diag );
+
+    /// @brief As buildDiscreteCbf(), with the CbfFormulation::continuous constraints.
+    void buildContinuousCbf( const ThorInput& in, Eigen::VectorXd& ci0, CbfDiagnostics& diag );
 
     /// @brief Legacy return value: `{h_min, interval, frame_id, distance, v_robot, v_obstacle}`.
     static std::vector<double> toLegacyDiagnostics( const CbfDiagnostics& cbf );
@@ -542,6 +621,12 @@ class ThorQP
         m_data = other.m_data;
         m_frameIds = other.m_frameIds;
         m_frame_radii = other.m_frame_radii;
+        m_cbf_formulation = other.m_cbf_formulation;
+        m_cbf_linearizations = other.m_cbf_linearizations;
+        m_cbf_linearization_damping = other.m_cbf_linearization_damping;
+        m_cbf_linearization_tolerance = other.m_cbf_linearization_tolerance;
+        m_cbf_reference = other.m_cbf_reference;
+        m_ci0_solved = other.m_ci0_solved;
         m_h = other.m_h;
         m_n_obstacle_points = other.m_n_obstacle_points;
 

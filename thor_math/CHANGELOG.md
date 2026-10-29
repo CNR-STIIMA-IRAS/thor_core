@@ -51,6 +51,39 @@ is covered by spheres as well.
   keypoints). The barrier is evaluated at the worst-case distance
   `d - delta_H`.
 - `ThorConfig::n_obstacle_points` and `ThorQP::getNumObstaclePoints()`.
+- Discrete-time CBF along the horizon, `ThorConfig::cbf_formulation =
+  CbfFormulation::discrete` (the default).
+  - The constraint is `h(X_{i+1}) >= max(0, 1 - gamma dt_i) h(X_i)`, with `h`
+    linearized around the previous solution applied from the current state.
+  - The continuous-time formulation is still available as
+    `CbfFormulation::continuous`. It only constrains the rate of `h` at the
+    start of each interval, so the predicted barrier could become strongly
+    negative along the long intervals of the horizon.
+  - On the example scene, the lowest barrier along the predicted plan goes
+    from -1.19 m (continuous) to -0.04 m (discrete), for about 30 µs more
+    per solve.
+- Repeated linearization of the CBF within a cycle.
+  - `ThorConfig::cbf_linearizations` (maximum QPs per cycle, default 1): each
+    QP after the first re-linearizes the CBF around the plan just found.
+  - `cbf_linearization_damping` (default 1): moves the linearization point only
+    part of the way towards the new solution, which damps the oscillations of
+    full steps.
+  - `cbf_linearization_tolerance` (default 0, never): stops as soon as the
+    solution changes by at most the tolerance.
+  - `ThorOutput::cbf_linearizations` and `cbf_linearization_step` report what
+    happened in the cycle. If a later QP fails, the previous solution is kept.
+  - On the example scene, `N = 4`, damping 0.7 and tolerance 0.5 rad/s² bring
+    the lowest predicted barrier from -4 cm to -1 mm, with no cycle below
+    -1 cm, at 1.25 QPs per cycle on average. Full steps (damping 1) oscillate:
+    `N = 6` is worse than `N = 2`.
+- `CbfDiagnostics::h_now`: the barrier on the current state, i.e. the actual
+  safety margin.
+- `cbf::BarrierTerms::grad_p`: gradient of the barrier with respect to the
+  robot center position.
+- `frameVelocityDerivatives()`: derivatives of the velocity of a frame origin
+  in world coordinates with respect to `q` and `dq`. The linear rows of
+  `pinocchio::getFrameVelocityDerivatives()` in `LOCAL_WORLD_ALIGNED` are not
+  this quantity.
 - `CbfDiagnostics` fields `v_robot`, `v_obstacle` and `obstacle_index`.
 - `ThorConfig::min_scaling`, `max_scaling` and `cbf_activation_distance`, which
   were hard-coded before.
@@ -68,9 +101,13 @@ is covered by spheres as well.
   - an optional `thor_math_docs` target (`-DBUILD_DOCS=ON`) that builds the
     HTML reference without warnings.
 - Unit tests for the CBF kernels: analytic cases, finite-difference Jacobians,
-  Lie derivatives (points and spheres) and `cbf_python` reference values.
-  Integration tests check the CBF rows built by `ThorQP`, the radii, the
-  per-obstacle `delta_H` and the input validation.
+  Lie derivatives and state gradients (points and spheres), and `cbf_python`
+  reference values.
+- Integration tests for `ThorQP`:
+  - the CBF rows of both formulations; the discrete rows are rebuilt by finite
+    differences on the nonlinear kinematics, also after a re-linearization;
+  - `frameVelocityDerivatives()`;
+  - the radii, the per-obstacle `delta_H` and the input validation.
 
 ### Changed
 
@@ -98,6 +135,9 @@ is covered by spheres as well.
   frame.
 - `solve()` no longer prints the barrier diagnostics on `std::cout`; they are
   returned in `ThorOutput::cbf`.
+- When the QP fails, the stored solution is reset to zero. The next cycle uses
+  it for the jerk term and the CBF linearization, and must not start from a
+  partial or non-finite result.
 - `thor_math.h` no longer includes `<iostream>`. Code that relied on that
   include must now include it itself.
 - `eigen_utils::standard_deviation()` and `correlation()` no longer use static

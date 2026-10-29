@@ -87,7 +87,8 @@ struct BarrierTerms
 {
   double          h     = 0.0;  ///< Barrier value [m].
   double          lie_f = 0.0;  ///< `L_f h`: rate of `h` with zero robot point acceleration [m/s].
-  Eigen::Vector3d lie_g = Eigen::Vector3d::Zero();  ///< `L_g h`: `dh/dt = L_f h + L_g h . a_r` [s].
+  Eigen::Vector3d lie_g = Eigen::Vector3d::Zero();  ///< `L_g h`: `dh/dt = L_f h + L_g h . a_r` [s]. It is also `dh/dv_r`, the gradient with respect to the robot center velocity.
+  Eigen::Vector3d grad_p = Eigen::Vector3d::Zero(); ///< `dh/dp_r`: gradient with respect to the robot center position, obstacle fixed.
   double          h_chi = 0.0;  ///< `dh/dd`, sensitivity of `h` to a distance error.
   double          d     = 0.0;  ///< Distance between the sphere surfaces [m] (negative if they overlap).
   double          v_r   = 0.0;  ///< Robot velocity along `u` [m/s].

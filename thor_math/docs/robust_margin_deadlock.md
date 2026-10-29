@@ -211,12 +211,16 @@ spheres, and still match the `cbf_python` reference values to 1e-12 (with
 
 ## 6. What remains open
 
-- **Predicted barrier values.** For intervals after the first, the CBF uses
-  the state predicted in the previous cycle. The CBF of interval `i`
-  constrains `dh/dt` at the start of the interval, not `h` in the predicted
-  state, so `CbfDiagnostics::h_min` can be briefly negative. In the example
-  this happens on the last interval only, while the actual clearance stays
-  above `C + delta_H`. This is a property of the MPC, not of the robust term.
+- **Predicted barrier values.** In the continuous formulation the CBF of
+  interval `i` constrains `dh/dt` at the start of the interval, not `h` in
+  the predicted state, so the predicted barrier can become strongly negative
+  along the long intervals (−1.19 m in the example) while the executed motion
+  stays safe. The discrete-time formulation, now the default
+  (`CbfFormulation::discrete`), constrains `h` at every predicted state and
+  brings this to −0.04 m, the residual linearization error on the longest
+  intervals. `CbfDiagnostics::h_now` reports the actual margin. This is a
+  property of the MPC, not of the robust term; both formulations evaluate the
+  barrier at the worst-case distance.
 - **Infeasibility for other reasons.** Other causes can still make the QP
   infeasible, for example an obstacle faster than the robot can react, or
   conflicts between several CBF rows and the joint limits. The caller then

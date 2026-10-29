@@ -143,6 +143,37 @@ TEST(CbfBarrierTerms, LieDerivativesMatchTimeDerivative)
   }
 }
 
+// The gradients with respect to the robot center position (grad_p) and
+// velocity (lie_g) linearize the barrier in the discrete-time CBF.
+TEST(CbfBarrierTerms, StateGradientsMatchFiniteDifferences)
+{
+  struct Case { Eigen::Vector3d p_r, v_r, p_o, v_o, a_o; };
+  const std::array<Case, 3> cases = {{
+    {{0.5, 0.2, 0.8}, {-0.3, 0.1, 0.05}, {1.2, 0.0, 0.9}, {-0.4, 0.2, 0.0}, {0.5, -1.0, 0.2}},
+    {{0.3, -0.1, 0.5}, {0.2, 0.3, 0.0}, {0.4, 0.0, 0.5}, {0.1, 0.0, 0.0}, {0.0, 0.0, 0.0}},
+    {{0.0, 0.0, 1.0}, {0.8, 0.0, -0.6}, {1.0, 0.5, 0.2}, {-1.0, -0.2, 0.3}, {0.3, 0.0, -0.4}},
+  }};
+  constexpr double eps = 1e-6;
+  for (const double radius : {0.0, 0.05, 0.2}) {
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+      SCOPED_TRACE(::testing::Message() << "radius " << radius << " case " << index);
+      const Case& c = cases[index];
+      auto h_at = [&](const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r) {
+        return barrierTerms(p_r, v_r, c.p_o, c.v_o, c.a_o, kTr, kAs, kC, radius).h;
+      };
+      Eigen::Vector3d grad_p, grad_v;
+      for (Eigen::Index i = 0; i < 3; ++i) {
+        const Eigen::Vector3d e = eps * Eigen::Vector3d::Unit(i);
+        grad_p(i) = (h_at(c.p_r + e, c.v_r) - h_at(c.p_r - e, c.v_r)) / (2.0 * eps);
+        grad_v(i) = (h_at(c.p_r, c.v_r + e) - h_at(c.p_r, c.v_r - e)) / (2.0 * eps);
+      }
+      const BarrierTerms b = barrierTerms(c.p_r, c.v_r, c.p_o, c.v_o, c.a_o, kTr, kAs, kC, radius);
+      EXPECT_TRUE(b.grad_p.isApprox(grad_p, 1e-6)) << b.grad_p.transpose() << " vs " << grad_p.transpose();
+      EXPECT_TRUE(b.lie_g.isApprox(grad_v, 1e-6)) << b.lie_g.transpose() << " vs " << grad_v.transpose();
+    }
+  }
+}
+
 // Spheres: the barrier sees the distance between the surfaces, while the
 // projection direction is still the one between the centers.
 TEST(CbfBarrierTerms, SphereRadiusShiftsTheDistance)

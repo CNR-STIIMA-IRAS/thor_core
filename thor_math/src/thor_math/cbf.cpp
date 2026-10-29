@@ -170,6 +170,12 @@ namespace cbf
     // Only v_r depends on the robot point acceleration: d(v_r)/d(acc) = u.
     out.lie_g = dh_dpsi(1) * u;
     out.h_chi = dh_dpsi(0);
+    // Gradient with respect to the robot center position, obstacle fixed:
+    // d(d)/dp_r = u, d(u.w)/dp_r = (I - u u^T) w / |p_r - p_o|.
+    out.grad_p = dh_dpsi(0) * u
+               + dh_dpsi(1) * (v_r - u * out.v_r) / d_psi
+               + dh_dpsi(2) * (v_o - u * out.v_o) / d_psi
+               + dh_dpsi(3) * (a_o - u * out.a_o) / d_psi;
     return out;
   }
 

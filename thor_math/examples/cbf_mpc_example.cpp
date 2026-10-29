@@ -7,13 +7,20 @@
 // The robot itself is covered by spheres centered at some of its frames.
 //
 // Run:
-//   thor_math_cbf_mpc_example [path/to/robot.urdf] [--no-cbf]
+//   thor_math_cbf_mpc_example [path/to/robot.urdf] [--no-cbf] [--continuous-cbf]
+//                             [--linearizations N] [--damping B] [--tolerance T]
 //
 // With the CBF the MPC changes the motion so that, for every robot sphere and
 // every obstacle sphere, the barrier h stays non-negative: the robot can always
 // stop at least C + delta_H away from the obstacle surfaces. With --no-cbf the
 // same MPC tracks the trajectory ignoring the obstacles, to compare the
-// minimum clearance reached.
+// minimum clearance reached. With --continuous-cbf the CBF is imposed in
+// continuous time at the start of each interval (the formulation of the
+// paper) instead of in discrete time along the whole horizon. With
+// --linearizations N each cycle solves up to N QPs, re-linearizing the CBF
+// around the plan of the previous one; --damping B moves the linearization
+// point only by a fraction B of the way, and --tolerance T stops as soon as
+// the solution changes by less than T [rad/s^2].
 //
 // The CBF does not know what an obstacle is: it only sees spheres with
 // position, velocity and acceleration. People, vehicles, other robots and
@@ -206,11 +213,22 @@ int main(int argc, char** argv)
 {
   std::string urdf = THOR_MATH_EXAMPLE_URDF;
   bool use_cbf = true;
+  auto formulation = thor::math::CbfFormulation::discrete;
+  unsigned int linearizations = 1;
+  double damping = 1.0, tolerance = 0.0;
   for (int i = 1; i < argc; ++i)
   {
     const std::string arg = argv[i];
     if (arg == "--no-cbf")
       use_cbf = false;
+    else if (arg == "--continuous-cbf")
+      formulation = thor::math::CbfFormulation::continuous;
+    else if (arg == "--linearizations" && i + 1 < argc)
+      linearizations = static_cast<unsigned int>(std::stoul(argv[++i]));
+    else if (arg == "--damping" && i + 1 < argc)
+      damping = std::stod(argv[++i]);
+    else if (arg == "--tolerance" && i + 1 < argc)
+      tolerance = std::stod(argv[++i]);
     else
       urdf = arg;
   }
@@ -301,11 +319,31 @@ int main(int argc, char** argv)
   // the robot reacts after T_r and then brakes at a_s while the obstacle keeps
   // its acceleration. The distance is the worst case allowed by the
   // perception error, d - delta_H: in practice each obstacle sphere is
-  // inflated by its delta_H. Each control interval gets the constraint
+  // inflated by its delta_H. h >= 0 means that the robot can always stop C
+  // away from the inflated obstacle.
+  //
+  // With X_0 the current state and X_{i+1} the predicted state at the end of
+  // interval i, the discrete formulation imposes on every interval
+  //   h(X_{i+1}) >= (1 - gamma dt_i) h(X_i)
+  // so h stays non-negative at every predicted state, and decays at most
+  // geometrically when it is not. The continuous formulation imposes
   //   dh/dt + gamma h >= 0
-  // which keeps h non-negative: the robot can always stop C away from the
-  // inflated obstacle.
+  // at the start of each interval: it constrains only the rate of h, which
+  // is enough for the first interval (one control period) but not along the
+  // long intervals of the horizon.
   config.cbf     = use_cbf;
+  config.cbf_formulation = formulation;
+  // The CBF is linearized around the plan of the previous cycle. With N > 1
+  // each cycle solves N QPs, each linearized around the plan of the previous
+  // one: the predicted barrier gets closer to the nonlinear one along the long
+  // intervals, at about N times the solve time. 1 is enough for safety, since
+  // the first interval, the one executed, is linearized over one period only.
+  config.cbf_linearizations = linearizations;
+  // Each new linearization point moves towards the new solution by a fraction
+  // `damping` of the way, which damps the oscillations of a full step; the
+  // iteration stops when the solution changes by at most `tolerance`.
+  config.cbf_linearization_damping   = damping;
+  config.cbf_linearization_tolerance = tolerance;
   config.a_s     = 2.5;    // robot braking deceleration [m/s^2]
   config.T_r     = 0.15;   // reaction time [s]
   config.C       = 0.05;   // safety margin between the surfaces [m]: sizes are in the radii
@@ -357,6 +395,7 @@ int main(int argc, char** argv)
   double tau = 0.0;      // trajectory time
   double scaling = 1.0;  // time scaling applied in the last cycle
   std::vector<double> min_clearance(config.n_obstacle_points, std::numeric_limits<double>::infinity());
+  double min_h_now = std::numeric_limits<double>::infinity();
   int fallback_cycles = 0;
 
   // Wall-clock time of every ThorQP::solve() call [us]. steady_clock is
@@ -367,13 +406,20 @@ int main(int argc, char** argv)
   solve_us.reserve(static_cast<std::size_t>(t_end / dt) + 1);
 
   std::printf("CBF %s, %zu robot spheres, %u obstacle spheres\n",
-              use_cbf ? "enabled" : "disabled", cbf_frames.size(), config.n_obstacle_points);
+              !use_cbf ? "disabled"
+                       : formulation == thor::math::CbfFormulation::discrete ? "enabled (discrete)"
+                                                                            : "enabled (continuous)",
+              cbf_frames.size(), config.n_obstacle_points);
+  if (use_cbf)
+    std::printf("CBF linearizations per cycle: up to %u, damping %.2f, tolerance %.3g rad/s^2\n",
+                config.cbf_linearizations, config.cbf_linearization_damping,
+                config.cbf_linearization_tolerance);
 #ifndef NDEBUG
   std::printf("warning: built without optimizations, timings are not representative "
               "(configure with -DCMAKE_BUILD_TYPE=Release)\n");
 #endif
-  std::printf("%6s %7s %7s %8s %8s %9s %10s  %s\n",
-              "t[s]", "tau[s]", "s", "h_min", "dist", "obstacle", "solve[us]", "robot frame");
+  std::printf("%6s %7s %7s %8s %8s %8s %9s %10s  %s\n",
+              "t[s]", "tau[s]", "s", "h_now", "h_min", "dist", "obstacle", "solve[us]", "robot frame");
 
   for (int k = 0; k * dt < t_end; ++k)
   {
@@ -433,17 +479,19 @@ int main(int argc, char** argv)
     {
       acc     = out.next_acc;      // joint accelerations of the first interval
       scaling = out.next_scaling;  // time scaling of the first interval
+      if (use_cbf)
+        min_h_now = std::min(min_h_now, out.cbf.h_now);
 
       if (k % 250 == 0)
       {
-        // out.cbf describes the most critical pair over the whole horizon;
-        // distance is measured between the sphere surfaces. h_min is the
-        // barrier at the worst-case distance; on the later intervals it is
-        // computed on the previous prediction, so it can be briefly negative
-        // even when the actual motion is safe (see the clearances below).
-        std::printf("%6.2f %7.3f %7.3f %8.3f %8.3f %9s %10.1f  %s\n", t, tau, scaling,
-                    use_cbf ? out.cbf.h_min : std::nan(""),
-                    use_cbf ? out.cbf.distance : std::nan(""),
+        // out.cbf.h_now is the barrier on the current state: the actual
+        // safety margin. The other fields describe the most critical pair over
+        // the whole horizon, on the predicted states used to linearize the CBF
+        // (h_min); distance is measured between the sphere surfaces.
+        const auto nan = std::nan("");
+        std::printf("%6.2f %7.3f %7.3f %8.3f %8.3f %8.3f %9s %10.1f  %s\n", t, tau, scaling,
+                    use_cbf ? out.cbf.h_now : nan, use_cbf ? out.cbf.h_min : nan,
+                    use_cbf ? out.cbf.distance : nan,
                     use_cbf ? obstacles.name[out.cbf.obstacle_index] : "-", elapsed_us,
                     use_cbf ? model.frames[out.cbf.frame_id].name.c_str() : "-");
       }
@@ -474,6 +522,8 @@ int main(int argc, char** argv)
   for (std::size_t o = 0; o < min_clearance.size(); ++o)
     std::printf("  %-8s %7.3f m%s\n", names.name[o], min_clearance[o],
                 min_clearance[o] < 0.0 ? "   <- collision" : "");
+  if (use_cbf)
+    std::printf("minimum barrier (h_now):   %.3f m\n", min_h_now);
   std::printf("trajectory progress:       %.2f s of %.2f s\n", tau, t_end);
   std::printf("fallback braking cycles:   %d\n", fallback_cycles);
 
