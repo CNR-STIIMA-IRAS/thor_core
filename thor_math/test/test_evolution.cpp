@@ -17,6 +17,7 @@ public:
   bool cbfBoundsActive() const { return m_use_cbf; }
   bool inputBlockingActive() const { return m_use_input_blocking; }
   Eigen::Index inequalityCount() const { return m_CI.cols(); }
+  const Eigen::MatrixXd& hessian() const { return m_H; }
 };
 
 ThorConfig makeConfig(bool input_blocking = true)
@@ -232,6 +233,29 @@ TEST(ThorQp, InitializesAndIntegratesState)
   Eigen::Vector4d expected;
   expected << 1.0275, -1.0275, 0.6, -0.6;
   EXPECT_TRUE(qp.getState().isApprox(expected, 1e-12));
+}
+
+// Regression: the jerk weight was added to the Hessian at every cycle, so the
+// cost changed from one solve to the next with the same inputs.
+TEST(ThorQp, CostDoesNotAccumulateAcrossCycles)
+{
+  InspectableThorQP qp;
+  ThorConfig config = makeConfig(false);
+  config.lambda_jerk = 1e-2;
+  qp.configure(config);
+  const Eigen::Vector4d state(0.1, -0.1, 0.2, 0.0);
+  qp.setInitialState(state);
+
+  Eigen::VectorXd acceleration;
+  double scaling = 0.0;
+  ASSERT_TRUE(qp.computedUncostrainedSolution(
+    Eigen::VectorXd::Constant(6, 0.3), Eigen::Vector2d::Zero(), 1.0, state, acceleration, scaling));
+  const Eigen::MatrixXd first = qp.hessian();
+  for (int cycle = 0; cycle < 5; ++cycle) {
+    ASSERT_TRUE(qp.computedUncostrainedSolution(
+      Eigen::VectorXd::Constant(6, 0.3), Eigen::Vector2d::Zero(), 1.0, state, acceleration, scaling));
+  }
+  EXPECT_TRUE(qp.hessian().isApprox(first, 1e-12)) << (qp.hessian() - first).norm();
 }
 
 TEST(ThorQp, ComputesFiniteUnconstrainedSolution)

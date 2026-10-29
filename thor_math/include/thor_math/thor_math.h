@@ -51,6 +51,7 @@
 
 #include <vector>
 #include <Eigen/Dense>
+#include <qpmad/solver.h>
 #include <thor_math/cbf.h>
 // coal/narrowphase/narrowphase.h (pulled in by Pinocchio built with collision
 // support) disables -Wdeprecated-declarations without restoring it, which would
@@ -492,6 +493,32 @@ class ThorQP
     double             m_cbf_linearization_damping = 1.0;
     double             m_cbf_linearization_tolerance = 0.0;
     Eigen::VectorXd    m_cbf_reference;   // inputs around which the discrete CBF is linearized
+
+    // Preallocated workspace of solve(), sized by updateMatrices(): solve()
+    // reuses it instead of allocating at every cycle.
+    struct Workspace
+    {
+      // Cost
+      Eigen::MatrixXd dqt;                         // targetDq.asDiagonal() * m_do_scaling
+      Eigen::VectorXd tmp_u;                       // intermediate products of size n_joints*n_intervals
+      // QP passed to qpmad: the variable bounds go as simple bounds, the
+      // other inequalities (and the equalities) as general constraints.
+      Eigen::MatrixXd qp_H, qp_A;
+      Eigen::VectorXd qp_lower, qp_upper;
+      Eigen::VectorXd ci0, ci0_base, last_sol, last_ci0;
+      Eigen::MatrixXd last_cbf_columns;
+      // CBF construction
+      Eigen::VectorXd q_ref, dq_ref, zero_acc, c;
+      Eigen::MatrixXd G;
+      Eigen::RowVectorXd dh_dq, dh_ddq;
+      Eigen::Matrix<double, 6, Eigen::Dynamic> J, dJ, local_dq, local_dv;
+      Eigen::Matrix<double, 3, Eigen::Dynamic> v_dq, v_dv;
+    };
+    Workspace          m_ws;
+    qpmad::Solver      m_solver;
+
+    /// @brief Sizes the workspace of solve() for the current settings.
+    void resizeWorkspace();
     Eigen::VectorXd    m_ci0_solved;      // inequality offsets of the last solve, CBF rows included
     /// @endcond
 
@@ -626,6 +653,7 @@ class ThorQP
         m_cbf_linearization_damping = other.m_cbf_linearization_damping;
         m_cbf_linearization_tolerance = other.m_cbf_linearization_tolerance;
         m_cbf_reference = other.m_cbf_reference;
+        m_ws = other.m_ws;
         m_ci0_solved = other.m_ci0_solved;
         m_h = other.m_h;
         m_n_obstacle_points = other.m_n_obstacle_points;

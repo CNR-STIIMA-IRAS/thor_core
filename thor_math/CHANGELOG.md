@@ -107,6 +107,9 @@ is covered by spheres as well.
   - the CBF rows of both formulations; the discrete rows are rebuilt by finite
     differences on the nonlinear kinematics, also after a re-linearization;
   - `frameVelocityDerivatives()`;
+  - the solution with simple bounds against the solution of the original
+    problem with the bounds as general rows, over 20 cycles with saturated
+    accelerations, for both formulations;
   - the radii, the per-obstacle `delta_H` and the input validation.
 
 ### Changed
@@ -135,6 +138,19 @@ is covered by spheres as well.
   frame.
 - `solve()` no longer prints the barrier diagnostics on `std::cout`; they are
   returned in `ThorOutput::cbf`.
+- Faster solve, measured on the example scene: from ~115 to ~77 µs
+  (discrete), from ~83 to ~53 µs (continuous), and from ~32 to ~19 µs
+  without CBF. The solution is unchanged.
+  - The bounds on the accelerations and on the time scaling are passed to
+    qpmad as simple bounds instead of identity rows of the constraint
+    matrix. `m_CI` keeps its layout.
+  - The QP solver and all the per-cycle buffers are members, sized by
+    `configure()`/`updateMatrices()`. The CBF rows and the cost are built
+    without heap allocations, and `solve()` copies the input only when it
+    must complete it with defaults. Heap allocations per `solve()` go from
+    437 to 1, the returned `ThorOutput::next_acc`.
+- `thor_math.h` includes `<qpmad/solver.h>`, which is installed with the
+  package.
 - When the QP fails, the stored solution is reset to zero. The next cycle uses
   it for the jerk term and the CBF linearization, and must not start from a
   partial or non-finite result.
@@ -169,6 +185,12 @@ is covered by spheres as well.
 - The `1e-6` replacement of a zero CBF offset.
 
 ### Fixed
+
+- **Jerk weight accumulating over cycles.** `computeActualMatrices()` added
+  `lambda_jerk J^T J` to the Hessian at every cycle without resetting it, so
+  with `lambda_jerk > 0` the jerk weight grew with time. The term is constant
+  and is now part of the fixed Hessian. A regression test checks that the
+  cost does not change across cycles with the same inputs.
 
 - **Robust term.** `cbf_python` and the paper add `+ h_chi delta_H` to the CBF
   condition. That relaxes the constraint, and it adds a distance (m) to a rate

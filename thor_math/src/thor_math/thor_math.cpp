@@ -182,24 +182,44 @@ namespace math
     
   }
 
+  namespace
+  {
+    // frameVelocityDerivatives() with caller-provided 6 x nv buffers, so that
+    // ThorQP does not allocate at every cycle.
+    void frameVelocityDerivatives ( const pinocchio::Model& model, pinocchio::Data& data,
+                                    pinocchio::FrameIndex frame_id,
+                                    Eigen::Matrix<double, 6, Eigen::Dynamic>& local_dq,
+                                    Eigen::Matrix<double, 6, Eigen::Dynamic>& local_dv,
+                                    Eigen::Matrix<double, 3, Eigen::Dynamic>& dv_dq,
+                                    Eigen::Matrix<double, 3, Eigen::Dynamic>& dv_ddq )
+    {
+      // Pinocchio only writes the columns of the frame's supporting joints.
+      local_dq.setZero(6, model.nv);
+      local_dv.setZero(6, model.nv);
+      pinocchio::getFrameVelocityDerivatives(model, data, frame_id, pinocchio::LOCAL, local_dq, local_dv);
+      const Eigen::Matrix3d R = data.oMf[frame_id].rotation();
+      const Eigen::Vector3d v = R * pinocchio::getFrameVelocity(model, data, frame_id, pinocchio::LOCAL).linear();
+
+      // v = R v_local: d/dq_i = R dv_local/dq_i + (dR/dq_i) v_local, dR/dq_i = [omega_i]x R.
+      dv_ddq.resize(3, model.nv);
+      dv_dq.resize(3, model.nv);
+      dv_ddq.noalias() = R * local_dv.topRows<3>();
+      dv_dq.noalias() = R * local_dq.topRows<3>();
+      for (Eigen::Index i = 0; i < model.nv; ++i)
+      {
+        const Eigen::Vector3d omega = R * local_dv.col(i).tail<3>();
+        dv_dq.col(i) += omega.cross(v);
+      }
+    }
+  }
+
   void frameVelocityDerivatives ( const pinocchio::Model& model, pinocchio::Data& data,
                                   pinocchio::FrameIndex frame_id,
                                   Eigen::Matrix<double, 3, Eigen::Dynamic>& dv_dq,
                                   Eigen::Matrix<double, 3, Eigen::Dynamic>& dv_ddq )
   {
-    // Pinocchio only writes the columns of the frame's supporting joints.
-    Eigen::Matrix<double, 6, Eigen::Dynamic> local_dq = Eigen::Matrix<double, 6, Eigen::Dynamic>::Zero(6, model.nv);
-    Eigen::Matrix<double, 6, Eigen::Dynamic> local_dv = Eigen::Matrix<double, 6, Eigen::Dynamic>::Zero(6, model.nv);
-    pinocchio::getFrameVelocityDerivatives(model, data, frame_id, pinocchio::LOCAL, local_dq, local_dv);
-    const Eigen::Matrix3d R = data.oMf[frame_id].rotation();
-    const Eigen::Vector3d v = R * pinocchio::getFrameVelocity(model, data, frame_id, pinocchio::LOCAL).linear();
-
-    // v = R v_local: d/dq_i = R dv_local/dq_i + (dR/dq_i) v_local, dR/dq_i = [omega_i]x R.
-    dv_ddq = R * local_dv.topRows<3>();
-    const Eigen::Matrix<double, 3, Eigen::Dynamic> omega = R * local_dv.bottomRows<3>();
-    dv_dq = R * local_dq.topRows<3>();
-    for (Eigen::Index i = 0; i < model.nv; ++i)
-      dv_dq.col(i) += omega.col(i).cross(v);
+    Eigen::Matrix<double, 6, Eigen::Dynamic> local_dq, local_dv;
+    frameVelocityDerivatives(model, data, frame_id, local_dq, local_dv, dv_dq, dv_ddq);
   }
 
   ThorQP::ThorQP()
@@ -522,7 +542,8 @@ namespace math
     
     m_H_fixed.block(0,0,m_nax*m_nc,m_nax*m_nc) =  m_velocity_forced_resp.transpose()*m_velocity_forced_resp+
                                                   m_lambda_acc*Eigen::MatrixXd::Identity(m_nax*m_nc,m_nax*m_nc) +
-                                                  m_lambda_clik*m_next_position_forced_resp.transpose()*m_next_position_forced_resp;
+                                                  m_lambda_clik*m_next_position_forced_resp.transpose()*m_next_position_forced_resp +
+                                                  m_lambda_jerk*m_jerk_forced_response.transpose()*m_jerk_forced_response;
     m_H_fixed.block(m_nax*m_nc,m_nax*m_nc,m_nc,m_nc)  =Eigen::MatrixXd::Identity(m_nc,m_nc)*m_lambda_scaling;
     
     m_H.resize((m_nax+1)*m_nc,(m_nax+1)*m_nc);
@@ -532,46 +553,74 @@ namespace math
     
     m_prediction_pos.resize(m_nax*m_nc);
     m_prediction_vel.resize(m_nax*m_nc);
+    resizeWorkspace();
     m_are_matrices_updated=true;
+  }
+
+  void ThorQP::resizeWorkspace()
+  {
+    const Eigen::Index n_x = static_cast<Eigen::Index>(m_nc) * (m_nax + 1);
+    const Eigen::Index n_u = static_cast<Eigen::Index>(m_nc) * m_nax;
+    // The first 2 n_x columns of m_CI are the variable bounds, passed to qpmad
+    // as simple bounds.
+    const Eigen::Index n_general = m_CE.cols() + m_CI.cols() - 2 * n_x;
+    m_ws.dqt.resize(n_u, m_nc);
+    m_ws.tmp_u.resize(n_u);
+    m_ws.qp_H.resize(n_x, n_x);
+    m_ws.qp_A.resize(n_general, n_x);
+    m_ws.qp_lower.resize(n_general);
+    m_ws.qp_upper.resize(n_general);
+    m_ws.ci0.resize(m_CI.cols());
+    m_ws.ci0_base.resize(m_CI.cols());
+    m_ws.last_sol.resize(n_x);
+    m_ws.last_ci0.resize(m_CI.cols());
+    m_sol.conservativeResize(n_x);
+    m_cbf_reference.resize(n_u);
+
+    if (!m_use_cbf)
+      return;
+    const Eigen::Index n_cbf = static_cast<Eigen::Index>(m_n_obstacle_points) * m_nc * m_frameIds.size();
+    const Eigen::Index n_nodes = static_cast<Eigen::Index>(m_nc + 1) * m_frameIds.size() * m_n_obstacle_points;
+    const Eigen::Index nv = m_model.nv;
+    m_ws.last_cbf_columns.resize(m_CI.rows(), n_cbf);
+    m_ws.q_ref.resize(n_u);
+    m_ws.dq_ref.resize(n_u);
+    m_ws.zero_acc.setZero(m_nax);
+    m_ws.c.resize(n_nodes);
+    m_ws.G.resize(n_nodes, n_u);
+    m_ws.dh_dq.resize(m_nax);
+    m_ws.dh_ddq.resize(m_nax);
+    m_ws.J.resize(6, nv);
+    m_ws.dJ.resize(6, nv);
+    m_ws.local_dq.resize(6, nv);
+    m_ws.local_dv.resize(6, nv);
+    m_ws.v_dq.resize(3, nv);
+    m_ws.v_dv.resize(3, nv);
   }
 
   void ThorQP::computeActualMatrices ( const Eigen::VectorXd& targetDq, const Eigen::VectorXd& next_targetQ, const double& target_scaling, const Eigen::VectorXd& x0 )
   {
-    // std::cout << "Computing actual matrices." << std::endl;
-    // std::cout << targetDq   << std::endl;
-    // std::cout << m_do_scaling << std::endl;
-    Eigen::MatrixXd DQT=targetDq.asDiagonal()*m_do_scaling;
-    // std::cout << "1" << std::endl;
-    m_H_variable.block(0,m_nax*m_nc,m_nax*m_nc,m_nc)=-m_velocity_forced_resp.transpose()*DQT;
-    // std::cout << "2" << std::endl;
+    // Products are written with noalias() into preallocated buffers, so that
+    // the cost is built without heap allocations.
+    Eigen::MatrixXd& DQT = m_ws.dqt;
+    DQT.noalias() = targetDq.asDiagonal()*m_do_scaling;
+    m_H_variable.block(0,m_nax*m_nc,m_nax*m_nc,m_nc).noalias()=-m_velocity_forced_resp.transpose()*DQT;
     m_H_variable.block(m_nax*m_nc,0,m_nc,m_nax*m_nc)=m_H_variable.block(0,m_nax*m_nc,m_nax*m_nc,m_nc).transpose();
-    // std::cout << "3" << std::endl;
-    m_H_variable.block(m_nax*m_nc,m_nax*m_nc,m_nc,m_nc)=DQT.transpose()*DQT;
-    // std::cout << "x0: "<<x0.transpose() << std::endl;
-    m_f = m_f_vel*x0.tail(m_nax)+m_f_pos*x0+m_f_scaling*target_scaling;
-    // std::cout << "4" << std::endl;
-    m_f.head(m_nc*m_nax) -= m_lambda_clik* (m_next_position_forced_resp.transpose()*next_targetQ).col(0);
-    
-    m_f.tail(m_nc) -= DQT.transpose()*m_velocity_free_resp*x0.tail(m_nax);
+    m_H_variable.block(m_nax*m_nc,m_nax*m_nc,m_nc,m_nc).noalias()=DQT.transpose()*DQT;
 
-    // if (0)
-    // {
-    //   for (unsigned int ic=0; ic<m_nc; ic++)
-    //   {
-    //     Eigen::VectorXd qc  = m_prediction_pos.block(ic*m_nax,0,m_nax,1);
-    //     Eigen::VectorXd Dqc = m_prediction_vel.block(ic*m_nax,0,m_nax,1);
-        
-        
-    //     m_H_variable.block(ic*m_nax,ic*m_nax,m_nax,m_nax) += m_lambda_tau * inertia_matrix.transpose()*inertia_matrix;
-    //     m_f.block(ic*m_nax,0,m_nax,1)                     += m_lambda_tau * non_linear_part_torque.transpose()*inertia_matrix;
-    //   }
-    // }
+    m_f.noalias() = m_f_vel*x0.tail(m_nax);
+    m_f.noalias() += m_f_pos*x0;
+    m_f += m_f_scaling*target_scaling;
+    m_f.head(m_nc*m_nax).noalias() -= m_lambda_clik*(m_next_position_forced_resp.transpose()*next_targetQ);
+    m_ws.tmp_u.noalias() = m_velocity_free_resp*x0.tail(m_nax);
+    m_f.tail(m_nc).noalias() -= DQT.transpose()*m_ws.tmp_u;
 
-    m_H_variable.block(0,0,m_nax*m_nc,m_nax*m_nc) += m_lambda_jerk * m_jerk_forced_response.transpose()*m_jerk_forced_response;
-    m_f.segment(0,m_nax*m_nc)                     += m_lambda_jerk * ((m_jerk_free_response*(m_sol.head(m_nax))).transpose()*m_jerk_forced_response);
+    // The jerk Hessian is constant and lives in m_H_fixed; only the term of the
+    // acceleration applied in the previous cycle changes.
+    m_ws.tmp_u.noalias() = m_jerk_free_response*m_sol.head(m_nax);
+    m_f.head(m_nax*m_nc).noalias() += m_lambda_jerk * (m_jerk_forced_response.transpose()*m_ws.tmp_u);
 
     m_H=m_H_fixed+m_H_variable;
-    
   }
 
   void ThorQP::setInitialState ( const Eigen::VectorXd& x0 )
@@ -611,17 +660,18 @@ namespace math
     out.cbf = CbfDiagnostics();
     // Build cost matrices and baseline inequality vector
     computeActualMatrices(targetDq,next_targetQ,target_scaling,x0);
-    Eigen::VectorXd ci0=m_ci0;
+    Eigen::VectorXd& ci0 = m_ws.ci0;
+    ci0 = m_ci0;
     // Velocity bounds
-    ci0.segment(2*m_nc*(m_nax+1)           ,m_nax*m_nc)+=m_velocity_free_resp*x0.tail(m_nax); // vel lower bounds
-    ci0.segment(2*m_nc*(m_nax+1)+m_nax*m_nc,m_nax*m_nc)-=m_velocity_free_resp*x0.tail(m_nax); // vel upper bounds
+    ci0.segment(2*m_nc*(m_nax+1)           ,m_nax*m_nc).noalias()+=m_velocity_free_resp*x0.tail(m_nax); // vel lower bounds
+    ci0.segment(2*m_nc*(m_nax+1)+m_nax*m_nc,m_nax*m_nc).noalias()-=m_velocity_free_resp*x0.tail(m_nax); // vel upper bounds
     // Position bounds
     if (m_are_position_bounds_active)
     {
-      ci0.segment(2*m_nc*(m_nax+1)+2*m_nax*m_nc,m_nax*m_nc)+=m_position_free_resp*x0; // pos lower bounds
-      ci0.segment(2*m_nc*(m_nax+1)+3*m_nax*m_nc,m_nax*m_nc)-=m_position_free_resp*x0; // pos upper bounds
-      ci0.segment(2*m_nc*(m_nax+1)+4*m_nax*m_nc,m_nax*m_nc)+=m_invariance_free_resp*x0; // invariance lower constraint
-      ci0.segment(2*m_nc*(m_nax+1)+5*m_nax*m_nc,m_nax*m_nc)-=m_invariance_free_resp*x0; // invariance upper constraint
+      ci0.segment(2*m_nc*(m_nax+1)+2*m_nax*m_nc,m_nax*m_nc).noalias()+=m_position_free_resp*x0; // pos lower bounds
+      ci0.segment(2*m_nc*(m_nax+1)+3*m_nax*m_nc,m_nax*m_nc).noalias()-=m_position_free_resp*x0; // pos upper bounds
+      ci0.segment(2*m_nc*(m_nax+1)+4*m_nax*m_nc,m_nax*m_nc).noalias()+=m_invariance_free_resp*x0; // invariance lower constraint
+      ci0.segment(2*m_nc*(m_nax+1)+5*m_nax*m_nc,m_nax*m_nc).noalias()-=m_invariance_free_resp*x0; // invariance upper constraint
     }
     // if  (m_are_torque_bounds_active)
     // {
@@ -640,20 +690,24 @@ namespace math
     // |u* - u_ref|_inf <= tolerance. The command is always the solution u* of
     // the last QP solved; a failure after the first QP keeps the previous one,
     // which satisfies its own linearization.
-    const Eigen::VectorXd ci0_base = ci0;
+    m_ws.ci0_base = ci0;
+    const Eigen::Index n_x = m_H.rows();
     const Eigen::Index n_cbf = m_use_cbf ? static_cast<Eigen::Index>(m_n_obstacle_points) * m_nc * m_frameIds.size() : 0;
     const Eigen::Index n_u = static_cast<Eigen::Index>(m_nc) * m_nax;
+    // The first 2 n_x columns of m_CI are the variable bounds (identity rows):
+    // qpmad receives them as simple bounds m_lb <= x <= m_ub, which it handles
+    // much more cheaply than general constraints.
+    const Eigen::Index n_bounds = 2 * n_x;
+    const Eigen::Index n_eq = m_CE.cols();
     const unsigned int linearizations = m_use_cbf ? m_cbf_linearizations : 1;
     m_cbf_reference = m_sol.head(n_u);
     if (!m_cbf_reference.allFinite())
       m_cbf_reference.setZero();
-    Eigen::VectorXd last_sol, last_ci0;
-    Eigen::MatrixXd last_cbf_columns;
     out.cbf_linearizations = 0;
     out.cbf_linearization_step = 0.0;
     for (unsigned int iteration = 0; iteration < linearizations; ++iteration)
     {
-      ci0 = ci0_base;
+      ci0 = m_ws.ci0_base;
       CbfDiagnostics diag;
       bool cbf_rows = false;
       // CBF constraints: one for each control interval, robot sphere and
@@ -668,25 +722,23 @@ namespace math
         m_h = diag.h_min;
         cbf_rows = !(m_h > m_cbf_activation_distance);
       }
-      const Eigen::Index inequality_count = m_CI.cols() - (m_use_cbf && !cbf_rows ? n_cbf : 0);
-      const Eigen::Index equality_count = m_CE.cols();
-      Eigen::MatrixXd constraints(equality_count + inequality_count, m_H.rows());
-      Eigen::VectorXd lower(equality_count + inequality_count);
-      Eigen::VectorXd upper = Eigen::VectorXd::Constant(
-        equality_count + inequality_count, std::numeric_limits<double>::infinity());
-      constraints.topRows(equality_count) = m_CE.transpose();
-      lower.head(equality_count) = -m_ce0;
-      upper.head(equality_count) = -m_ce0;
-      constraints.bottomRows(inequality_count) = m_CI.leftCols(inequality_count).transpose();
-      lower.tail(inequality_count) = -ci0.head(inequality_count);
+      const Eigen::Index n_in = m_CI.cols() - n_bounds - (m_use_cbf && !cbf_rows ? n_cbf : 0);
+      const Eigen::Index n_general = n_eq + n_in;
+      m_ws.qp_A.topRows(n_eq) = m_CE.transpose();
+      m_ws.qp_A.middleRows(n_eq, n_in) = m_CI.middleCols(n_bounds, n_in).transpose();
+      m_ws.qp_lower.head(n_eq) = -m_ce0;
+      m_ws.qp_upper.head(n_eq) = -m_ce0;
+      m_ws.qp_lower.segment(n_eq, n_in) = -ci0.segment(n_bounds, n_in);
+      m_ws.qp_upper.segment(n_eq, n_in).setConstant(std::numeric_limits<double>::infinity());
 
       // qpmad factorizes H in place; retain the original cost matrix in ThorQP.
-      Eigen::MatrixXd hessian = m_H;
-      qpmad::Solver solver;
+      m_ws.qp_H = m_H;
       std::string failure;
       try
       {
-        const qpmad::Solver::ReturnStatus status = solver.solve(m_sol, hessian, m_f, constraints, lower, upper);
+        const qpmad::Solver::ReturnStatus status = m_solver.solve(
+          m_sol, m_ws.qp_H, m_f, m_lb, m_ub,
+          m_ws.qp_A.topRows(n_general), m_ws.qp_lower.head(n_general), m_ws.qp_upper.head(n_general));
         if (status != qpmad::Solver::OK || !m_sol.allFinite())
           failure = "Problem is not feasible. Check the constraints and the target values.";
       }
@@ -703,9 +755,9 @@ namespace math
           m_sol.setZero();
           throw std::runtime_error(failure);
         }
-        m_sol = last_sol;
-        m_ci0_solved = last_ci0;
-        m_CI.rightCols(n_cbf) = last_cbf_columns;
+        m_sol = m_ws.last_sol;
+        m_ci0_solved = m_ws.last_ci0;
+        m_CI.rightCols(n_cbf) = m_ws.last_cbf_columns;
         break;
       }
 
@@ -717,18 +769,22 @@ namespace math
       out.cbf_linearization_step = (m_sol.head(n_u) - m_cbf_reference).lpNorm<Eigen::Infinity>();
       if (out.cbf_linearization_step <= m_cbf_linearization_tolerance)
         break;
-      last_sol = m_sol;
-      last_ci0 = ci0;
-      last_cbf_columns = m_CI.rightCols(n_cbf);
+      m_ws.last_sol = m_sol;
+      m_ws.last_ci0 = ci0;
+      m_ws.last_cbf_columns = m_CI.rightCols(n_cbf);
 
       m_cbf_reference += m_cbf_linearization_damping * (m_sol.head(n_u) - m_cbf_reference);
       // The prediction is the linearization point of the continuous CBF.
-      m_prediction_vel = m_velocity_forced_resp*m_cbf_reference+m_velocity_free_resp*x0.tail(m_nax);
-      m_prediction_pos = m_position_forced_resp*m_cbf_reference+m_position_free_resp*x0;
+      m_prediction_vel.noalias() = m_velocity_forced_resp*m_cbf_reference;
+      m_prediction_vel.noalias() += m_velocity_free_resp*x0.tail(m_nax);
+      m_prediction_pos.noalias() = m_position_forced_resp*m_cbf_reference;
+      m_prediction_pos.noalias() += m_position_free_resp*x0;
     }
     // The prediction of the command, used by the next cycle.
-    m_prediction_vel = m_velocity_forced_resp*m_sol.head(n_u)+m_velocity_free_resp*x0.tail(m_nax);
-    m_prediction_pos = m_position_forced_resp*m_sol.head(n_u)+m_position_free_resp*x0;
+    m_prediction_vel.noalias() = m_velocity_forced_resp*m_sol.head(n_u);
+    m_prediction_vel.noalias() += m_velocity_free_resp*x0.tail(m_nax);
+    m_prediction_pos.noalias() = m_position_forced_resp*m_sol.head(n_u);
+    m_prediction_pos.noalias() += m_position_free_resp*x0;
 
     // std::cout << "m_ci0 size: " << m_ci0.size() << " x 1" << std::endl;
     next_acc=m_sol.head(m_nax);
@@ -759,20 +815,20 @@ namespace math
     const Eigen::Index n_cols = m_CI.cols();
 
     // Pinocchio needs 6 x nv buffers and only writes the columns of the frame's
-    // supporting joints, so they must be zeroed before each use.
-    Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, m_model.nv), dJ(6, m_model.nv);
-    const Eigen::VectorXd zero_acc = Eigen::VectorXd::Zero(m_nax);
+    // supporting joints, so they must be zeroed before each use. All the
+    // buffers are preallocated in m_ws (see resizeWorkspace()).
+    Eigen::Matrix<double, 6, Eigen::Dynamic>& J = m_ws.J;
+    Eigen::Matrix<double, 6, Eigen::Dynamic>& dJ = m_ws.dJ;
     double h_min = std::numeric_limits<double>::infinity();
     double h_now = std::numeric_limits<double>::infinity();
 
     for (unsigned int i = 0; i < m_nc; ++i)
     {
       const double t_start = (i == 0) ? 0.0 : m_prediction_time(i-1);
-      const Eigen::VectorXd q  = (i == 0) ? Eigen::VectorXd(x0.head(m_nax))
-                                          : Eigen::VectorXd(m_prediction_pos.segment(m_nax*(i-1), m_nax));
-      const Eigen::VectorXd dq = (i == 0) ? Eigen::VectorXd(x0.tail(m_nax))
-                                          : Eigen::VectorXd(m_prediction_vel.segment(m_nax*(i-1), m_nax));
-      pinocchio::computeForwardKinematicsDerivatives(m_model, m_data, q, dq, zero_acc);
+      using ConstRef = Eigen::Ref<const Eigen::VectorXd>;
+      const ConstRef q  = (i == 0) ? ConstRef(x0.head(m_nax)) : ConstRef(m_prediction_pos.segment(m_nax*(i-1), m_nax));
+      const ConstRef dq = (i == 0) ? ConstRef(x0.tail(m_nax)) : ConstRef(m_prediction_vel.segment(m_nax*(i-1), m_nax));
+      pinocchio::computeForwardKinematicsDerivatives(m_model, m_data, q, dq, m_ws.zero_acc);
       pinocchio::updateFramePlacements(m_model, m_data);
       pinocchio::computeJointJacobiansTimeVariation(m_model, m_data, q, dq);
 
@@ -813,7 +869,7 @@ namespace math
 
           // Store each barrier constraint as a column: CI^T x + ci0 >= 0.
           const Eigen::Index col = n_cols - m_n_obstacle_points * m_nc * (j+1) + m_n_obstacle_points * i + k;
-          m_CI.col(col).segment(m_nax * i, m_nax) = J.topRows<3>().transpose() * b.lie_g;
+          m_CI.col(col).segment(m_nax * i, m_nax).noalias() = J.topRows<3>().transpose() * b.lie_g;
           ci0(col) = b.lie_g.dot(dJdq) + b.lie_f + m_gamma * b.h;
         }
       }
@@ -838,29 +894,33 @@ namespace math
     const std::size_t n_frames = m_frameIds.size();
     const std::size_t n_obstacles = static_cast<std::size_t>(m_n_obstacle_points);
 
+    // All the buffers are preallocated in m_ws (see resizeWorkspace()).
     const Eigen::VectorXd& u_ref = m_cbf_reference;
-    const Eigen::VectorXd q_ref  = m_position_forced_resp * u_ref + m_position_free_resp * x0;
-    const Eigen::VectorXd dq_ref = m_velocity_forced_resp * u_ref + m_velocity_free_resp * x0.tail(m_nax);
+    Eigen::VectorXd& q_ref = m_ws.q_ref;
+    Eigen::VectorXd& dq_ref = m_ws.dq_ref;
+    q_ref.noalias() = m_position_forced_resp * u_ref;
+    q_ref.noalias() += m_position_free_resp * x0;
+    dq_ref.noalias() = m_velocity_forced_resp * u_ref;
+    dq_ref.noalias() += m_velocity_free_resp * x0.tail(m_nax);
 
     // Affine barrier h ~ c + G u of every node and pair, indexed by node(m, j, k).
-    const std::size_t n_nodes = (m_nc + 1) * n_frames * n_obstacles;
-    auto node = [&](std::size_t m, std::size_t j, std::size_t k) { return (m * n_frames + j) * n_obstacles + k; };
-    std::vector<double> c(n_nodes, 0.0);
-    Eigen::MatrixXd G = Eigen::MatrixXd::Zero(static_cast<Eigen::Index>(n_nodes), n_u);
+    auto node = [&](std::size_t m, std::size_t j, std::size_t k) { return static_cast<Eigen::Index>((m * n_frames + j) * n_obstacles + k); };
+    Eigen::VectorXd& c = m_ws.c;
+    Eigen::MatrixXd& G = m_ws.G;
+    G.topRows(static_cast<Eigen::Index>(n_frames * n_obstacles)).setZero();  // the current state does not depend on u
 
-    Eigen::Matrix<double, 3, Eigen::Dynamic> v_dq(3, m_model.nv), v_dv(3, m_model.nv);
-    const Eigen::VectorXd zero_acc = Eigen::VectorXd::Zero(m_nax);
+    Eigen::Matrix<double, 3, Eigen::Dynamic>& v_dq = m_ws.v_dq;
+    Eigen::Matrix<double, 3, Eigen::Dynamic>& v_dv = m_ws.v_dv;
     double h_min = std::numeric_limits<double>::infinity();
     double h_now = std::numeric_limits<double>::infinity();
 
     for (unsigned int m = 0; m <= m_nc; ++m)
     {
       const double t = (m == 0) ? 0.0 : m_prediction_time(m-1);
-      const Eigen::VectorXd q  = (m == 0) ? Eigen::VectorXd(x0.head(m_nax))
-                                          : Eigen::VectorXd(q_ref.segment(m_nax*(m-1), m_nax));
-      const Eigen::VectorXd dq = (m == 0) ? Eigen::VectorXd(x0.tail(m_nax))
-                                          : Eigen::VectorXd(dq_ref.segment(m_nax*(m-1), m_nax));
-      pinocchio::computeForwardKinematicsDerivatives(m_model, m_data, q, dq, zero_acc);
+      using ConstRef = Eigen::Ref<const Eigen::VectorXd>;
+      const ConstRef q  = (m == 0) ? ConstRef(x0.head(m_nax)) : ConstRef(q_ref.segment(m_nax*(m-1), m_nax));
+      const ConstRef dq = (m == 0) ? ConstRef(x0.tail(m_nax)) : ConstRef(dq_ref.segment(m_nax*(m-1), m_nax));
+      pinocchio::computeForwardKinematicsDerivatives(m_model, m_data, q, dq, m_ws.zero_acc);
       pinocchio::updateFramePlacements(m_model, m_data);
 
       for (std::size_t j = 0; j < n_frames; ++j)
@@ -868,7 +928,7 @@ namespace math
         const unsigned int frameId = m_frameIds[j];
         const Eigen::Vector3d p_r = m_data.oMf[frameId].translation();
         const Eigen::Vector3d v_r = pinocchio::getFrameVelocity(m_model, m_data, frameId, pinocchio::LOCAL_WORLD_ALIGNED).linear();
-        frameVelocityDerivatives(m_model, m_data, frameId, v_dq, v_dv);
+        frameVelocityDerivatives(m_model, m_data, frameId, m_ws.local_dq, m_ws.local_dv, v_dq, v_dv);
 
         for (std::size_t k = 0; k < n_obstacles; ++k)
         {
@@ -894,17 +954,18 @@ namespace math
             diag.obstacle_index = static_cast<unsigned int>(k);
           }
 
-          const std::size_t n = node(m, j, k);
+          const Eigen::Index n = node(m, j, k);
           if (m == 0)
           {
-            c[n] = b.h;  // the current state does not depend on u
+            c(n) = b.h;
             continue;
           }
-          const Eigen::RowVectorXd dh_dq  = b.grad_p.transpose() * v_dv + b.lie_g.transpose() * v_dq;
-          const Eigen::RowVectorXd dh_ddq = b.lie_g.transpose() * v_dv;
-          G.row(static_cast<Eigen::Index>(n)) = dh_dq * m_position_forced_resp.middleRows(m_nax*(m-1), m_nax)
-                                              + dh_ddq * m_velocity_forced_resp.middleRows(m_nax*(m-1), m_nax);
-          c[n] = b.h - G.row(static_cast<Eigen::Index>(n)).dot(u_ref);
+          m_ws.dh_dq.noalias()  = b.grad_p.transpose() * v_dv;
+          m_ws.dh_dq.noalias() += b.lie_g.transpose() * v_dq;
+          m_ws.dh_ddq.noalias() = b.lie_g.transpose() * v_dv;
+          G.row(n).noalias()  = m_ws.dh_dq * m_position_forced_resp.middleRows(m_nax*(m-1), m_nax);
+          G.row(n).noalias() += m_ws.dh_ddq * m_velocity_forced_resp.middleRows(m_nax*(m-1), m_nax);
+          c(n) = b.h - G.row(n).dot(u_ref);
         }
       }
     }
@@ -919,10 +980,10 @@ namespace math
         for (std::size_t k = 0; k < n_obstacles; ++k)
         {
           const auto col = n_cols - static_cast<Eigen::Index>(n_obstacles * (m_nc * (j+1) - i) - k);
-          const auto next = static_cast<Eigen::Index>(node(i+1, j, k));
-          const auto prev = static_cast<Eigen::Index>(node(i, j, k));
+          const Eigen::Index next = node(i+1, j, k);
+          const Eigen::Index prev = node(i, j, k);
           m_CI.col(col).head(n_u) = (G.row(next) - alpha * G.row(prev)).transpose();
-          ci0(col) = c[static_cast<std::size_t>(next)] - alpha * c[static_cast<std::size_t>(prev)];
+          ci0(col) = c(next) - alpha * c(prev);
         }
       }
     }
@@ -1061,22 +1122,34 @@ namespace math
       doSolve(in, out);
       return out;
     }
-    ThorInput with_defaults = in;
-    if (in.obstacle_pos.empty() && in.obstacle_vel.empty() && in.obstacle_acc.empty())
+    // Inputs that leave some obstacle vectors empty are completed with the
+    // defaults on a copy; complete inputs are used as they are, so that a
+    // control loop that fills everything does not allocate here.
+    const bool complete = !in.obstacle_pos.empty() && !in.obstacle_acc.empty() &&
+                          !in.obstacle_radius.empty() && !in.obstacle_delta_H.empty();
+    ThorInput with_defaults;
+    if (!complete)
     {
-      // No obstacle data: assume n_obstacle_points far-away, still points.
-      with_defaults.obstacle_pos.assign(m_n_obstacle_points, Eigen::Vector3d::Constant(100.0));
-      with_defaults.obstacle_vel.assign(m_n_obstacle_points, Eigen::Vector3d::Zero());
+      with_defaults = in;
+      if (in.obstacle_pos.empty() && in.obstacle_vel.empty() && in.obstacle_acc.empty())
+      {
+        // No obstacle data: assume n_obstacle_points far-away, still points.
+        with_defaults.obstacle_pos.assign(m_n_obstacle_points, Eigen::Vector3d::Constant(100.0));
+        with_defaults.obstacle_vel.assign(m_n_obstacle_points, Eigen::Vector3d::Zero());
+      }
+      const std::size_t n = with_defaults.obstacle_pos.size();
+      if (in.obstacle_acc.empty())
+        with_defaults.obstacle_acc.assign(n, Eigen::Vector3d::Zero());
+      if (in.obstacle_radius.empty())
+        with_defaults.obstacle_radius.assign(n, 0.0);
+      if (in.obstacle_delta_H.empty())
+        with_defaults.obstacle_delta_H.assign(n, m_delta_H);
     }
-    const std::size_t n_obstacles = with_defaults.obstacle_pos.size();
-    if (in.obstacle_acc.empty())
-      with_defaults.obstacle_acc.assign(n_obstacles, Eigen::Vector3d::Zero());
-    if (in.obstacle_radius.empty())
-      with_defaults.obstacle_radius.assign(n_obstacles, 0.0);
-    if (in.obstacle_delta_H.empty())
-      with_defaults.obstacle_delta_H.assign(n_obstacles, m_delta_H);
-    if (with_defaults.obstacle_vel.size() != n_obstacles || with_defaults.obstacle_acc.size() != n_obstacles ||
-        with_defaults.obstacle_radius.size() != n_obstacles || with_defaults.obstacle_delta_H.size() != n_obstacles ||
+    const ThorInput& full = complete ? in : with_defaults;
+
+    const std::size_t n_obstacles = full.obstacle_pos.size();
+    if (full.obstacle_vel.size() != n_obstacles || full.obstacle_acc.size() != n_obstacles ||
+        full.obstacle_radius.size() != n_obstacles || full.obstacle_delta_H.size() != n_obstacles ||
         n_obstacles < static_cast<std::size_t>(m_n_obstacle_points))
     {
       throw std::invalid_argument("obstacle_pos, obstacle_vel and, if given, obstacle_acc, obstacle_radius and "
@@ -1085,10 +1158,10 @@ namespace math
     }
     for (std::size_t k = 0; k < n_obstacles; ++k)
     {
-      if (!(with_defaults.obstacle_radius[k] >= 0.0) || !(with_defaults.obstacle_delta_H[k] >= 0.0))
+      if (!(full.obstacle_radius[k] >= 0.0) || !(full.obstacle_delta_H[k] >= 0.0))
         throw std::invalid_argument("obstacle_radius and obstacle_delta_H must not be negative");
     }
-    doSolve(with_defaults, out);
+    doSolve(full, out);
     return out;
   }
 

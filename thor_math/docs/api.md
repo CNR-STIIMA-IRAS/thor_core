@@ -286,13 +286,13 @@ plan of each cycle):
 
 | `N` | damping | tolerance [rad/s²] | lowest `h` along the plan | cycles with `h < -1 cm` | QPs per cycle | mean / max solve time |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | – | – | -0.040 m | 53 | 1.00 | 114 / 210 µs |
-| 2 | 1 | 0 | -0.027 m | 6 | 2.00 | 236 / 680 µs |
-| 3 | 1 | 0 | -0.027 m | 28 | 2.92 | 331 / 800 µs |
-| 6 | 1 | 0 | -0.027 m | 50 | 5.16 | 560 / 1210 µs |
-| 6 | 0.7 | 0 | -0.010 m | 0 | 6.00 | 643 / 1030 µs |
-| 6 | 0.7 | 0.1 | -0.010 m | 0 | 1.89 | 218 / 910 µs |
-| 4 | 0.7 | 0.5 | -0.001 m | 0 | 1.25 | 144 / 635 µs |
+| 1 | – | – | -0.040 m | 53 | 1.00 | 77 / 167 µs |
+| 2 | 1 | 0 | -0.027 m | 6 | 2.00 | 149 / 508 µs |
+| 3 | 1 | 0 | -0.027 m | 28 | 2.92 | 223 / 429 µs |
+| 6 | 1 | 0 | -0.027 m | 50 | 5.16 | 401 / 796 µs |
+| 6 | 0.7 | 0 | -0.010 m | 0 | 6.00 | 454 / 747 µs |
+| 6 | 0.7 | 0.1 | -0.010 m | 0 | 1.89 | 149 / 580 µs |
+| 4 | 0.7 | 0.5 | -0.001 m | 0 | 1.25 | 98 / 540 µs |
 
 - **Full steps oscillate.** With `damping = 1` more linearizations can make
   the plan worse (`N = 6` is worse than `N = 2`), because the linearization
@@ -321,8 +321,8 @@ states of the new solution over 3000 cycles:
 
 | | lowest `h` along the plan | cycles with `h < -1 cm` | mean solve time |
 | --- | --- | --- | --- |
-| continuous | -1.19 m | 254 | ~80 µs |
-| discrete | -0.04 m | 53 | ~110 µs |
+| continuous | -1.19 m | 254 | ~55 µs |
+| discrete | -0.04 m | 53 | ~80 µs |
 
 ---
 
@@ -368,8 +368,57 @@ and the last solution.
 `n_intervals * robot spheres * obstacle spheres` CBF rows. There is one
 kinematics evaluation per interval (continuous) or per interval plus one
 (discrete), times `cbf_linearizations`. With 6 joints, 5 intervals, 5 robot
-spheres and 3 obstacle spheres, a solve takes about 80–150 µs in Release
-builds with one linearization (see the example).
+spheres and 3 obstacle spheres, a solve takes about 55–80 µs in Release
+builds with one linearization (see the example and section 3.1).
+
+### 3.1 Performance
+
+Profile of one solve on the example scene before the optimizations below
+(discrete formulation, one linearization, Release build, AMD Ryzen 9
+5900HX):
+
+| phase | time |
+| --- | --- |
+| QP solver (qpmad) | 52 µs |
+| kinematics (Pinocchio, one pass per prediction node) | 25 µs |
+| barriers and CBF rows | 22 µs |
+| cost and constraint assembly | 13 µs |
+| **total** | **~115 µs** |
+
+After the optimizations:
+
+- **Total time.** It goes to ~77 µs (discrete), ~53 µs (continuous) and
+  ~19 µs (without CBF), with the same solutions.
+- **QP solver.** Passing the bounds as simple bounds alone brought it from
+  52 to 32 µs.
+- **Allocations.** Heap allocations per `solve()` go from 437 to 1.
+
+What makes the difference:
+
+- **Simple bounds.** The bounds on the accelerations and on the time scaling
+  are passed to qpmad as simple bounds `lb <= x <= ub`. They are not passed
+  as general constraints (identity rows), which the active-set solver would
+  treat like any other row. `m_CI` still stores them in its first columns,
+  but they are not sent to the solver. The problem and the solution are the
+  same.
+- **No allocation in the loop.** The solver and every buffer (QP matrices,
+  CBF rows, kinematic Jacobians) are members, sized once by `configure()`
+  and reused. Products are written with `noalias()`. `solve()` copies the
+  input only when some obstacle vectors must be completed with defaults.
+  The one allocation left is the `ThorOutput::next_acc` returned by value.
+  This also makes the solve time more deterministic.
+- **Eigen is not the bottleneck.** At these sizes (35 variables, ~255
+  constraints) the time goes into the active-set iterations, the kinematics
+  and, before, the allocations, not into the matrix products.
+- **SIMD (AVX2/FMA) is not enabled.** Pinocchio from the ROS packages is
+  built for generic x86-64. Building `thor_math` with `-march=native` makes
+  it binary-incompatible with that Pinocchio, and the example crashes, even
+  with `EIGEN_MAX_ALIGN_BYTES=16`. Enabling it needs Pinocchio, coal,
+  `thor_math` and the application all built from source with the same flags.
+
+Remaining options, not implemented: drop the CBF rows of far pairs
+individually (fewer rows and barriers), and benchmark other QP solvers
+(qpOASES with hot start, HPIPM, ProxQP).
 
 ---
 

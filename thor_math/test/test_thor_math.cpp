@@ -43,6 +43,8 @@ public:
 
   const Eigen::VectorXd& solvedOffsets() const { return m_ci0_solved; }
   void setSolution(const Eigen::VectorXd& solution) { m_sol = solution; }
+  const Eigen::MatrixXd& hessian() const { return m_H; }
+  const Eigen::VectorXd& gradient() const { return m_f; }
   const Eigen::VectorXd& controlIntervals() const { return m_control_intervals; }
 
   // Predicted [q; dq] at node m (0: x0, m: end of interval m-1) for inputs u.
@@ -766,6 +768,78 @@ TEST_F(ThorQpIntegrationTest, RepeatedLinearizationUsesThePlanOfThePreviousQp)
     qp.setInitialState(state);
     ASSERT_NO_THROW(out = qp.solve(in));
     EXPECT_EQ(out.cbf_linearizations, 3U);
+  }
+}
+
+// The variable bounds are passed to qpmad as simple bounds. The solution must
+// be the one of the original problem, with the bounds as general rows of m_CI.
+TEST_F(ThorQpIntegrationTest, SimpleBoundsGiveTheSameSolutionAsGeneralRows)
+{
+  const auto axes = static_cast<unsigned int>(model_.nv);
+  constexpr unsigned int intervals = 4;
+  constexpr double ddq_max = 1.0;  // low, so that the accelerations saturate
+  for (const CbfFormulation formulation : {CbfFormulation::discrete, CbfFormulation::continuous}) {
+    SCOPED_TRACE(formulation == CbfFormulation::discrete ? "discrete" : "continuous");
+    ThorConfig config = baseConfig(intervals, 0.1, 0.01, false);
+    config.C = 0.05;
+    config.qmax = constant(2.0 * kPi);
+    config.qmin = constant(-2.0 * kPi);
+    config.Dqmax = constant(2.0);
+    config.DDqmax = constant(ddq_max);
+    config.lambda_acc = 1e-4;
+    config.lambda_jerk = 1e-3;
+    config.lambda_scaling = 10.0;
+    config.lambda_clik = 1e+2;
+    config.position_bounds = true;
+    config.cbf = true;
+    config.cbf_formulation = formulation;
+    config.cbf_frame_ids = {static_cast<unsigned int>(model_.getFrameId("wrist_1_link")),
+                            static_cast<unsigned int>(model_.getFrameId("tool0"))};
+    config.cbf_frame_radii = {0.06, 0.05};
+    config.n_obstacle_points = 1;
+
+    InspectableOptimizer qp;
+    qp.setPinocchioModel(model_);
+    ASSERT_NO_THROW(qp.configure(config));
+    Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
+    state.head(axes) << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0;
+    qp.setInitialState(state);
+
+    ThorInput in;
+    in.target_dq = Eigen::VectorXd::Zero(axes * intervals);
+    for (unsigned int i = 0; i < intervals; ++i)
+      in.target_dq(i * axes) = 1.5;  // fast enough to hit the bounds
+    // A static obstacle close enough to keep the CBF rows in the QP (h below
+    // the activation distance), far enough not to stop the robot.
+    in.obstacle_pos = {Eigen::Vector3d(1.5, 1.5, 0.7)};
+    in.obstacle_vel = {Eigen::Vector3d::Zero()};
+    in.obstacle_radius = {0.15};
+
+    int cycles_with_active_bounds = 0;
+    for (int cycle = 0; cycle < 20; ++cycle) {
+      SCOPED_TRACE(cycle);
+      in.x0 = qp.getState();
+      in.next_target_q = in.x0.head(axes);
+      ThorOutput out;
+      ASSERT_NO_THROW(out = qp.solve(in));
+      ASSERT_LT(out.cbf.h_min, config.cbf_activation_distance);  // all the CBF rows are in the QP
+
+      Eigen::MatrixXd hessian = qp.hessian();
+      Eigen::VectorXd reference;
+      qpmad::Solver solver;
+      const Eigen::Index rows = qp.inequalities().cols();
+      ASSERT_EQ(solver.solve(reference, hessian, qp.gradient(), qp.inequalities().transpose(),
+                             -qp.solvedOffsets(),
+                             Eigen::VectorXd::Constant(rows, std::numeric_limits<double>::infinity())),
+                qpmad::Solver::OK);
+      EXPECT_TRUE(qp.solution().isApprox(reference, 1e-8))
+        << (qp.solution() - reference).lpNorm<Eigen::Infinity>();
+      const Eigen::VectorXd u = qp.solution().head(axes * intervals);
+      if ((u.cwiseAbs().array() >= ddq_max - 1e-9).any())
+        ++cycles_with_active_bounds;
+      qp.updateState(out.next_acc);
+    }
+    EXPECT_GT(cycles_with_active_bounds, 0);  // the simple bounds were exercised
   }
 }
 
