@@ -37,6 +37,28 @@ cmake -S thor_math -B build/thor_math
 cmake --build build/thor_math -j
 ```
 
+## Example
+
+[thor_math/examples/cbf_mpc_example.cpp](thor_math/examples/cbf_mpc_example.cpp) runs the MPC with the control barrier function on a UR10 while a person walks up to it. Run it again with `--no-cbf` to compare:
+
+```bash
+cmake -S thor_math -B build/thor_math -DBUILD_EXAMPLES=ON
+cmake --build build/thor_math -j
+./build/thor_math/thor_math_cbf_mpc_example
+./build/thor_math/thor_math_cbf_mpc_example --no-cbf
+```
+
+## Documentation
+
+The API reference, with the formulation of the MPC and of the control barrier function, is in [thor_math/docs/api.md](thor_math/docs/api.md). The public headers are documented with Doxygen; to generate the HTML reference in `build/thor_math/docs/html`:
+
+```bash
+cmake -S thor_math -B build/thor_math -DBUILD_DOCS=ON
+cmake --build build/thor_math --target thor_math_docs
+```
+
+Changes are listed in [thor_math/CHANGELOG.md](thor_math/CHANGELOG.md).
+
 ## License
 
 BSD 3-Clause, see [LICENSE](LICENSE).

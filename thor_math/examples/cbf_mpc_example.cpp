@@ -1,0 +1,427 @@
+// Closed-loop example of thor::math::ThorQP: a UR10 sweeps its base joint
+// while a person walks towards it, stops, and stands next to the robot.
+//
+// Run:
+//   thor_math_cbf_mpc_example [path/to/robot.urdf] [--no-cbf]
+//
+// With the CBF the MPC slows the robot down (time scaling < 1) and, when
+// needed, brakes it, so that the barrier h stays non-negative: the robot can
+// always stop at least C + delta_H away from the person. With --no-cbf the
+// same MPC tracks the trajectory ignoring the person, to compare the minimum
+// distance reached.
+//
+// The example shows, in order:
+//   1. loading the robot model and choosing the frames monitored by the CBF;
+//   2. filling ThorConfig (horizon, weights, limits, CBF parameters);
+//   3. the control loop: nominal trajectory sampled at the scaled time,
+//      human measurements, ThorQP::solve(), fallback braking, integration;
+//   4. the computation time of the MPC, compared with the control period.
+
+#include <thor_math/thor_math.h>
+#include <thor_math/cbf.h>
+
+#include <pinocchio/parsers/urdf.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace
+{
+
+constexpr double kPi = 3.141592653589793238462643383279502884;
+
+// ---------------------------------------------------------------------------
+// Nominal trajectory, parametrized by the trajectory time tau.
+//
+// The MPC does not follow time t but tau, with d(tau)/dt = s (the time
+// scaling computed by the optimizer). s = 1 follows the trajectory at nominal
+// speed, s < 1 slows it down, s = 0 stops along the path.
+// ---------------------------------------------------------------------------
+struct NominalTrajectory
+{
+  Eigen::VectorXd q0;            // configuration at tau = 0
+  double amplitude = 1.0;        // base joint sweep amplitude [rad]
+  double omega     = 1.0;        // base joint sweep frequency [rad/s]
+
+  Eigen::VectorXd position(double tau) const
+  {
+    Eigen::VectorXd q = q0;
+    q(0) += amplitude * std::sin(omega * tau);
+    return q;
+  }
+
+  Eigen::VectorXd velocity(double tau) const
+  {
+    Eigen::VectorXd dq = Eigen::VectorXd::Zero(q0.size());
+    dq(0) = amplitude * omega * std::cos(omega * tau);
+    return dq;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Simulated person: two tracked points (torso and hand).
+//
+// In a real application these come from a perception system. ThorQP needs,
+// for each point, position, velocity and (optionally) acceleration in the
+// robot base frame. The CBF extrapolates them along the horizon with constant
+// acceleration, the same assumption used by the d_min formula.
+// ---------------------------------------------------------------------------
+struct HumanSample
+{
+  std::vector<Eigen::Vector3d> pos, vel, acc;
+};
+
+HumanSample human(double t)
+{
+  // Torso walks along -x at 0.6 m/s, then brakes at 1.5 m/s^2 until it stops.
+  const Eigen::Vector3d start(1.85, 0.72, 0.8);
+  const double v_walk = 0.6, a_brake = 1.5;
+  const double t_walk = 1.5, t_brake = v_walk / a_brake;
+
+  double x = 0.0, v = 0.0, a = 0.0;
+  if (t < t_walk)
+  {
+    x = -v_walk * t;
+    v = -v_walk;
+  }
+  else if (t < t_walk + t_brake)
+  {
+    const double tb = t - t_walk;
+    x = -v_walk * t_walk - v_walk * tb + 0.5 * a_brake * tb * tb;
+    v = -v_walk + a_brake * tb;
+    a = a_brake;
+  }
+  else
+  {
+    x = -v_walk * t_walk - 0.5 * v_walk * t_brake;
+  }
+
+  const Eigen::Vector3d torso = start + Eigen::Vector3d(x, 0.0, 0.0);
+  const Eigen::Vector3d hand_offset(-0.35, -0.2, -0.1);  // the hand reaches towards the robot
+
+  HumanSample h;
+  h.pos = {torso, torso + hand_offset};
+  h.vel = {Eigen::Vector3d(v, 0.0, 0.0), Eigen::Vector3d(v, 0.0, 0.0)};
+  h.acc = {Eigen::Vector3d(a, 0.0, 0.0), Eigen::Vector3d(a, 0.0, 0.0)};
+  return h;
+}
+
+// Computation time statistics of the MPC. A real-time loop must finish every
+// solve within the control period, so the tail (99th percentile, maximum)
+// matters more than the mean.
+struct TimingStats
+{
+  double mean = 0.0, median = 0.0, p99 = 0.0, max = 0.0;
+  std::size_t over_budget = 0;  // solves longer than the control period
+};
+
+TimingStats timingStats(std::vector<double> samples, double budget)
+{
+  TimingStats stats;
+  if (samples.empty())
+    return stats;
+  std::sort(samples.begin(), samples.end());
+  const auto percentile = [&](double p) {
+    return samples[static_cast<std::size_t>(p * static_cast<double>(samples.size() - 1))];
+  };
+  double sum = 0.0;
+  for (const double v : samples)
+    sum += v;
+  stats.mean = sum / static_cast<double>(samples.size());
+  stats.median = percentile(0.5);
+  stats.p99 = percentile(0.99);
+  stats.max = samples.back();
+  stats.over_budget = static_cast<std::size_t>(
+    samples.end() - std::upper_bound(samples.begin(), samples.end(), budget));
+  return stats;
+}
+
+// Current minimum robot-human distance over the monitored frames, computed
+// independently of the optimizer to compare runs with and without CBF.
+double currentDistance(const pinocchio::Model& model, pinocchio::Data& data,
+                       const Eigen::VectorXd& q, const std::vector<unsigned int>& frames,
+                       const std::vector<Eigen::Vector3d>& human_pos)
+{
+  pinocchio::framesForwardKinematics(model, data, q);
+  double d = std::numeric_limits<double>::infinity();
+  for (const unsigned int f : frames)
+    for (const Eigen::Vector3d& p : human_pos)
+      d = std::min(d, (data.oMf[f].translation() - p).norm());
+  return d;
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+  std::string urdf = THOR_MATH_EXAMPLE_URDF;
+  bool use_cbf = true;
+  for (int i = 1; i < argc; ++i)
+  {
+    const std::string arg = argv[i];
+    if (arg == "--no-cbf")
+      use_cbf = false;
+    else
+      urdf = arg;
+  }
+
+  // -------------------------------------------------------------------------
+  // 1. Robot model
+  //
+  // The CBF needs a Pinocchio model with nq == nv == number of joints. The
+  // monitored points are Pinocchio frames: here a few links plus the
+  // intermediate frames added along the arm, so that the whole arm, not only
+  // the tool, keeps its distance from the person.
+  // -------------------------------------------------------------------------
+  pinocchio::Model model;
+  try
+  {
+    pinocchio::urdf::buildModel(urdf, model);
+  }
+  catch (const std::exception& e)
+  {
+    std::cerr << "cannot load " << urdf << ": " << e.what() << "\n";
+    return 1;
+  }
+  const auto n_joints = static_cast<unsigned int>(model.nv);
+
+  std::vector<unsigned int> cbf_frames;
+  for (const char* name : {"forearm_link", "elbow_joint_intermediate_2", "wrist_1_link",
+                           "wrist_3_link", "tool0"})
+  {
+    if (model.existFrame(name))
+      cbf_frames.push_back(static_cast<unsigned int>(model.getFrameId(name)));
+  }
+  if (cbf_frames.empty())
+  {
+    std::cerr << "none of the monitored frames is in the model\n";
+    return 1;
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Configuration
+  // -------------------------------------------------------------------------
+  thor::math::ThorConfig config;
+
+  // Horizon: n_intervals control intervals over horizon_time. With
+  // input_blocking the intervals grow quadratically: the first one equals the
+  // sampling period (it is the command actually applied), the later ones are
+  // longer and only make the MPC look ahead.
+  const double dt = 0.002;  // 500 Hz control loop
+  config.n_intervals     = 5;
+  config.n_joints        = n_joints;
+  config.horizon_time    = 0.2;
+  config.sampling_period = dt;
+  config.input_blocking  = true;
+
+  // Cost weights. The MPC minimizes, over the horizon,
+  //   || dq_pred - s * target_dq ||^2            velocity tracking
+  // + lambda_acc     || ddq ||^2                 effort
+  // + lambda_scaling || s - target_scaling ||^2  keep the nominal speed
+  // + lambda_clik    || q_next - next_target_q ||^2  position drift correction
+  config.lambda_acc     = 1e-6;
+  config.lambda_scaling = 50.0;
+  config.lambda_clik    = 1e4;
+  config.lambda_jerk    = 0.0;
+
+  // Joint limits. Velocity and acceleration limits are imposed on every
+  // predicted interval; position_bounds adds position and invariance limits.
+  config.qmin   = model.lowerPositionLimit;
+  config.qmax   = model.upperPositionLimit;
+  config.Dqmax  = Eigen::VectorXd::Constant(n_joints, 2.0);
+  config.DDqmax = Eigen::VectorXd::Constant(n_joints, 10.0);
+  config.position_bounds = true;
+
+  // Time scaling bounds: 0 lets the MPC stop the progress along the path.
+  config.min_scaling = 0.0;
+  config.max_scaling = 1.0;
+
+  // Control barrier function (see thor_math/cbf.h). For each monitored frame
+  // and human point the barrier is
+  //   h = d_min - C
+  // where d_min is the minimum distance reached if the robot reacts after T_r
+  // and then brakes at a_s while the person keeps its acceleration. Each
+  // control interval gets the constraint
+  //   dh/dt + gamma (h - h_chi delta_H) >= 0
+  // which keeps h >= h_chi delta_H, i.e. a non-negative barrier even for the
+  // worst-case distance d - delta_H.
+  config.cbf     = use_cbf;
+  config.a_s     = 2.5;    // robot braking deceleration [m/s^2]
+  config.T_r     = 0.15;   // reaction time [s]
+  config.C       = 0.10;   // static safety margin [m]
+  config.gamma   = 5.0;    // class-K gain [1/s]: higher reacts later but harder
+  // delta_H from the perception noise (Eq. 9 of the paper): 99.9% confidence
+  // (beta = 3.291), position/velocity/acceleration noise std devs, and an
+  // upper bound of the stopping time.
+  config.delta_H = thor::math::cbf::perceptionMargin(3.291, 0.015, 0.072, 0.196, 0.3);
+  config.cbf_frame_ids  = cbf_frames;
+  config.n_human_points = 2;
+  // Above this barrier value the CBF rows are dropped from the QP (all
+  // humans far away): a smaller and faster problem with the same solution.
+  config.cbf_activation_distance = 5.0;
+
+  // The model must be given before configure() when the CBF is enabled.
+  // configure() validates everything and throws std::invalid_argument on
+  // inconsistent settings, leaving the optimizer unchanged.
+  thor::math::ThorQP qp;
+  qp.setPinocchioModel(model);
+  try
+  {
+    qp.configure(config);
+  }
+  catch (const std::invalid_argument& e)
+  {
+    std::cerr << "invalid configuration: " << e.what() << "\n";
+    return 1;
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Control loop
+  // -------------------------------------------------------------------------
+  NominalTrajectory trajectory;
+  trajectory.q0 = Eigen::VectorXd::Zero(n_joints);
+  trajectory.q0 << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0;
+  trajectory.amplitude = 1.2;
+  trajectory.omega     = 1.0;
+
+  // The state is x = [q; dq], here starting at rest. ThorQP integrates it
+  // with updateState(); in a real application x0 comes from the robot
+  // encoders at every cycle.
+  Eigen::VectorXd x0 = Eigen::VectorXd::Zero(2 * n_joints);
+  x0.head(n_joints) = trajectory.position(0.0);
+  qp.setInitialState(x0);
+
+  const Eigen::VectorXd prediction_time = qp.getPredictionTimeInstant();
+  pinocchio::Data data(model);
+
+  double tau = 0.0;      // trajectory time
+  double scaling = 1.0;  // time scaling applied in the last cycle
+  double min_distance = std::numeric_limits<double>::infinity();
+  double min_h = std::numeric_limits<double>::infinity();
+  int fallback_cycles = 0;
+
+  // Wall-clock time of every ThorQP::solve() call [us]. steady_clock is
+  // monotonic, so it is not affected by system clock adjustments.
+  using Clock = std::chrono::steady_clock;
+  const double t_end = 6.0;
+  std::vector<double> solve_us;
+  solve_us.reserve(static_cast<std::size_t>(t_end / dt) + 1);
+
+  std::printf("CBF %s, delta_H = %.3f m\n", use_cbf ? "enabled" : "disabled", config.delta_H);
+#ifndef NDEBUG
+  std::printf("warning: built without optimizations, timings are not representative "
+              "(configure with -DCMAKE_BUILD_TYPE=Release)\n");
+#endif
+  std::printf("%6s %7s %7s %8s %8s %6s %10s  %s\n",
+              "t[s]", "tau[s]", "s", "h_min", "dist", "human", "solve[us]", "frame");
+
+  for (int k = 0; k * dt < t_end; ++k)
+  {
+    const double t = k * dt;
+    x0 = qp.getState();
+
+    thor::math::ThorInput in;
+    in.x0 = x0;
+
+    // Target velocities for every interval, sampled at the trajectory time
+    // the robot is expected to reach at that interval (the MPC multiplies
+    // them by its own scaling). Layout: [dq_interval_0; dq_interval_1; ...].
+    in.target_dq.resize(n_joints * config.n_intervals);
+    for (unsigned int i = 0; i < config.n_intervals; ++i)
+      in.target_dq.segment(i * n_joints, n_joints) = trajectory.velocity(tau + scaling * prediction_time(i));
+    // Position the robot should have at the end of the first interval.
+    in.next_target_q  = trajectory.position(tau + scaling * prediction_time(0));
+    // Desired scaling: 1 = nominal speed. A supervisor could lower it.
+    in.target_scaling = 1.0;
+
+    // Human points (ignored when the CBF is disabled). Leaving all three
+    // vectors empty means "no person": n_human_points far-away, still points.
+    // human_acc may be left empty if no acceleration estimate is available.
+    const HumanSample h = human(t);
+    in.human_pos = h.pos;
+    in.human_vel = h.vel;
+    in.human_acc = h.acc;
+
+    // solve() throws std::runtime_error if the QP is infeasible, e.g. when
+    // the person moves faster than the robot can react. A real controller
+    // must then fall back to a safe command: here, brake as hard as allowed
+    // and freeze the progress along the path (as the cbf_python controller).
+    //
+    // Only solve() is timed: it builds the cost, evaluates the robot
+    // kinematics and the barrier for every interval, frame and human point,
+    // and runs the QP solver. A failed solve is timed too, since in a real
+    // loop it also consumes the cycle.
+    thor::math::ThorOutput out;
+    bool solved = true;
+    const Clock::time_point start = Clock::now();
+    try
+    {
+      out = qp.solve(in);
+    }
+    catch (const std::runtime_error&)
+    {
+      solved = false;
+    }
+    const double elapsed_us = std::chrono::duration<double, std::micro>(Clock::now() - start).count();
+    solve_us.push_back(elapsed_us);
+
+    Eigen::VectorXd acc;
+    if (solved)
+    {
+      acc     = out.next_acc;      // joint accelerations of the first interval
+      scaling = out.next_scaling;  // time scaling of the first interval
+      if (use_cbf)
+        min_h = std::min(min_h, out.cbf.h_min);
+
+      if (k % 250 == 0)
+      {
+        // out.cbf describes the most critical pair over the whole horizon.
+        std::printf("%6.2f %7.3f %7.3f %8.3f %8.3f %6u %10.1f  %s\n", t, tau, scaling,
+                    use_cbf ? out.cbf.h_min : std::nan(""), out.cbf.distance,
+                    out.cbf.human_index, elapsed_us,
+                    use_cbf ? model.frames[out.cbf.frame_id].name.c_str() : "-");
+      }
+    }
+    else
+    {
+      ++fallback_cycles;
+      const Eigen::VectorXd dq = x0.tail(n_joints);
+      acc = (-dq / dt).cwiseMax(-config.DDqmax).cwiseMin(config.DDqmax);
+      scaling = 0.0;
+    }
+
+    // Integrate the robot state and the trajectory time. In a real
+    // application acc (or the integrated q, dq) is sent to the robot.
+    qp.updateState(acc);
+    tau += scaling * dt;
+
+    min_distance = std::min(min_distance,
+                            currentDistance(model, data, qp.getState().head(n_joints), cbf_frames, h.pos));
+  }
+
+  std::printf("\nminimum robot-human distance: %.3f m\n", min_distance);
+  if (use_cbf)
+    std::printf("minimum barrier value:        %.3f m\n", min_h);
+  std::printf("trajectory progress:          %.2f s of %.2f s\n", tau, t_end);
+  std::printf("fallback braking cycles:      %d\n", fallback_cycles);
+
+  // The budget is the control period: a solve longer than dt misses the
+  // deadline of the 500 Hz loop. The CBF adds n_intervals * frames * humans
+  // rows (here 5 * 5 * 2 = 50) and one kinematics evaluation per interval,
+  // so compare with --no-cbf to see its cost.
+  const double budget_us = dt * 1e6;
+  const TimingStats timing = timingStats(solve_us, budget_us);
+  std::printf("\nMPC computation time over %zu solves [us]:\n", solve_us.size());
+  std::printf("  mean %.1f   median %.1f   p99 %.1f   max %.1f\n",
+              timing.mean, timing.median, timing.p99, timing.max);
+  std::printf("  budget %.0f us (control period): %zu solves over budget, worst-case load %.0f%%\n",
+              budget_us, timing.over_budget, 100.0 * timing.max / budget_us);
+  return 0;
+}

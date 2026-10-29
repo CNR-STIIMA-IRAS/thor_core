@@ -1,16 +1,20 @@
-#include <thor_math/thor_math.h>
+#include <iostream>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <qpmad/solver.h>
+
+#include <thor_math/thor_math.h>
 // #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 // #include <pinocchio/algorithm/frames.hpp>
+
 namespace thor 
 {
 namespace math
 {
-  const double zero_vel = 1e-6; // Threshold for zero velocity
   int computeRank(const Eigen::MatrixXd& M, double tol = 1e-10) {
     Eigen::JacobiSVD<Eigen::MatrixXd> svd(M);
     const Eigen::VectorXd& singularValues = svd.singularValues();
@@ -22,30 +26,6 @@ namespace math
     }
     return rank;
 }
-
-  std::pair<Eigen::Vector2d, Eigen::Matrix<double, 2, 3>> range_state_derivative(const Eigen::Vector3d& r, const Eigen::Vector3d& v, double eps = 1e-12)
-  {
-    double d = r.norm();
-    if (d < eps) {
-        throw std::runtime_error("Range is zero; direction is undefined.");
-    }
-
-    double f1 = r.dot(v) / d;
-    double f2 = v.dot(v) / d - std::pow(r.dot(v), 2) / std::pow(d, 3);
-
-    Eigen::RowVector3d g2 = r.transpose() / d;
-
-    // f is (2, 1) column vector
-    Eigen::Vector2d f;
-    f << f1, f2;
-
-    // g is (2, 3) matrix: first row zeros, second row is g2
-    Eigen::Matrix<double, 2, 3> g;
-    g.setZero();
-    g.row(1) = g2;
-
-    return std::make_pair(f, g);
-  }
 
   Eigen::MatrixXd freeResponse ( const double& t, const unsigned int& nax )
   {
@@ -221,130 +201,11 @@ namespace math
       m_T_r(0.0),
       m_C(0.0),
       m_gamma(0.0),
+      m_delta_H(0.0),
       m_h(0.0),
       m_num_ph(0)
   {
   }
-
-  void ThorQP::compute_h(const double& v_h, const double& v_r, const double& d, double& h)
-  {
-   double coef, d_min;
-    if (v_r < zero_vel)
-    {
-      if (v_h > zero_vel)
-      {
-        h = d - m_C
-                - v_r * v_r / (2.0 * m_a_s)
-                + (v_r - v_h) * m_T_r
-                + v_r * v_h / m_a_s;
-      }
-      else if (v_h <= v_r)
-      {
-        //h = d - m_C;
-        //TOASK
-        h = d - m_C
-              + v_r * v_r / (2.0 * m_a_s)
-              + v_r * m_T_r;
-      }
-      else
-      {
-        h = d - m_C
-                - (v_h - v_r) * (v_h - v_r) * 0.5 / m_a_s
-                + (v_r - v_h) * m_T_r;
-      }
-    }
-    else 
-    {
-      if (m_use_cbf_move_away)
-      {
-        h = d - m_C
-                - (v_r - v_h) * m_T_r
-                - (v_r - v_h) * (v_r - v_h) / (2.0 * m_a_s);
-      }
-      else 
-      {
-        if (v_h <= zero_vel)
-        {
-          d_min = m_C;
-          coef = m_T_r;
-        }
-        else
-        {
-            d_min = m_C + v_h * m_T_r;
-            coef = m_T_r + v_h / m_a_s;
-        }
-        if (d < d_min)
-        {
-            h = coef*v_r;
-        }
-        else
-        {
-            //x = np.array([d-dmin, coef*v])
-            //h = np.linalg.norm(x, ord=1)
-            h =  d - d_min + coef * v_r;
-        }
-      }
-    }
-  }
-
-  void ThorQP::compute_theta(const double& v_h, const double& v_r, const double& d, std::vector<double>& theta)
-  {
-    if (v_r < zero_vel)
-    {
-      theta[0] = 1.0;
-      if (v_h > zero_vel)
-      {
-        theta[1] =  - v_r / m_a_s
-                    + m_T_r
-                    + v_h / m_a_s;
-      }
-      else if (v_h <= v_r)
-      {
-        //theta[1] = zero_vel;
-        theta[1] =  + v_r / m_a_s
-                    + m_T_r;
-      }
-      else
-      {
-        theta[1] =  (v_h - v_r)/ m_a_s
-                    + m_T_r;
-      }
-    }
-     
-    else
-    { 
-      if (m_use_cbf_move_away)
-      {
-        theta[0] = 1.0;
-        theta[1] = - m_T_r
-                - (v_r - v_h) / m_a_s;
-      }
-      else
-      {
-        double coef, d_min;
-        if (v_h < zero_vel)
-        {
-          d_min = m_C;
-          coef = m_T_r;
-        }
-        else
-        {
-          d_min = m_C + v_h * m_T_r;
-          coef = m_T_r + v_h / m_a_s;
-        }
-        if (d < d_min)
-        {
-          theta[0] = 0.0; 
-        }
-        else 
-        {
-          theta[0] = 1.0;
-        }
-        theta[1] =  coef; // the minus sign because we use -theta in the optimization problem
-      }
-    }
-  }
-
 
   void ThorQP::setCBFParameters ( const double& a_s, const double& T_r, const double& C, const double& gamma )
   {
@@ -402,12 +263,8 @@ namespace math
     }
   }
 
-  void ThorQP::activateCbfMoveAway(const bool enable_cbf_move_away)
+  void ThorQP::activateCbfMoveAway(const bool /*enable_cbf_move_away*/)
   {
-    if (m_use_cbf_move_away!=enable_cbf_move_away)
-    {
-      m_use_cbf_move_away=enable_cbf_move_away;
-    }
   }
 
   bool ThorQP::arePositionBoundsActive()
@@ -497,8 +354,8 @@ namespace math
       m_lb.segment(ic*m_nax,m_nax) = -m_DDqmax;
       m_ub.segment(ic*m_nax,m_nax) =  m_DDqmax;
     }
-    m_lb.tail(m_nc).setConstant(0.05);
-    m_ub.tail(m_nc).setConstant(1.01);
+    m_lb.tail(m_nc).setConstant(m_min_scaling);
+    m_ub.tail(m_nc).setConstant(m_max_scaling);
 
     /*
     * I u > lb    ->  I*u+lb>0
@@ -722,23 +579,22 @@ namespace math
     return m_state;
   }
 
-  std::vector<double> ThorQP::computedCostrainedSolution ( const Eigen::VectorXd& targetDq,
-                                            const Eigen::VectorXd& next_targetQ, 
-                                            const double& target_scaling, 
-                                            const Eigen::VectorXd& x0,
-                                            Eigen::VectorXd& next_acc, 
-                                            double& next_scaling,
-                                            const std::vector<Eigen::Vector3d> &v_h_vector, 
-                                            const std::vector<Eigen::Vector3d> &p_h_vector
-                                            )
+  void ThorQP::doSolve ( const ThorInput& in, ThorOutput& out )
   {
-    std::vector<double> return_value(6, 0.0);
+    const Eigen::VectorXd& targetDq = in.target_dq;
+    const Eigen::VectorXd& next_targetQ = in.next_target_q;
+    const double& target_scaling = in.target_scaling;
+    const Eigen::VectorXd& x0 = in.x0;
+    const std::vector<Eigen::Vector3d>& v_h_vector = in.human_vel;
+    const std::vector<Eigen::Vector3d>& p_h_vector = in.human_pos;
+    Eigen::VectorXd& next_acc = out.next_acc;
+    double& next_scaling = out.next_scaling;
+    out.cbf = CbfDiagnostics();
     // Build cost matrices and baseline inequality vector
     computeActualMatrices(targetDq,next_targetQ,target_scaling,x0);
     Eigen::VectorXd ci0=m_ci0;
   
     int n_cols = m_CI.cols();
-    Eigen::Vector3d p_rmin, p_h_min;
     // Velocity bounds
     ci0.segment(2*m_nc*(m_nax+1)           ,m_nax*m_nc)+=m_velocity_free_resp*x0.tail(m_nax); // vel lower bounds
     ci0.segment(2*m_nc*(m_nax+1)+m_nax*m_nc,m_nax*m_nc)-=m_velocity_free_resp*x0.tail(m_nax); // vel upper bounds
@@ -759,187 +615,77 @@ namespace math
     //   }
     // }
 
-    // CBF constraint
+    // CBF constraints: one for each prediction interval, frame and human point.
+    // Interval i starts from the current state (i == 0) or from the end of
+    // interval i-1 of the previous prediction, and u_i is its acceleration:
+    //   L_g h (J u_i + dJ dq) + L_f h + gamma (h - h_chi delta_H) >= 0
+    // h - h_chi delta_H bounds the barrier at the worst-case distance d - delta_H.
+    // cbf_python (and the paper) add + h_chi delta_H instead, which relaxes the
+    // constraint and mixes m with m/s.
+    // With a single interval and delta_H = 0 this is the one-step controller of cbf_python.
     if (m_use_cbf)
     {
-      
-      Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> J, dJ;
-      J.resize(m_nax, m_model.nv);
-      dJ.resize(m_nax, m_model.nv);
-      int h_index = 117;
-      Eigen::Matrix<double,3,Eigen::Dynamic> Jlin, dJlin;
-      Eigen::Matrix<double, 2, 3> g;
-      std::pair<Eigen::Vector2d, Eigen::Matrix<double, 2, 3>> state_derivative;
-      double h_min = 100000.0; // Minimum value for the barrier function
+      // Pinocchio needs 6 x nv buffers and only writes the columns of the frame's
+      // supporting joints, so they must be zeroed before each use.
+      Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, m_model.nv), dJ(6, m_model.nv);
+      const Eigen::VectorXd zero_acc = Eigen::VectorXd::Zero(m_nax);
+      double h_min = std::numeric_limits<double>::infinity();
 
-      for (size_t j = 0; j < m_frameIds.size(); ++j)
+      for (unsigned int i = 0; i < m_nc; ++i)
       {
-        size_t frameId = m_frameIds[j];
-        for ( size_t i = 0; i< m_nc; i++ )
+        const double t_start = (i == 0) ? 0.0 : m_prediction_time(i-1);
+        const Eigen::VectorXd q  = (i == 0) ? Eigen::VectorXd(x0.head(m_nax))
+                                            : Eigen::VectorXd(m_prediction_pos.segment(m_nax*(i-1), m_nax));
+        const Eigen::VectorXd dq = (i == 0) ? Eigen::VectorXd(x0.tail(m_nax))
+                                            : Eigen::VectorXd(m_prediction_vel.segment(m_nax*(i-1), m_nax));
+        pinocchio::computeForwardKinematicsDerivatives(m_model, m_data, q, dq, zero_acc);
+        pinocchio::updateFramePlacements(m_model, m_data);
+        pinocchio::computeJointJacobiansTimeVariation(m_model, m_data, q, dq);
+
+        for (std::size_t j = 0; j < m_frameIds.size(); ++j)
         {
-          Eigen::Vector3d p_r, v_r;
-          const Eigen::VectorXd &q  = m_prediction_pos.segment(m_nax*i, m_nax);
-          const Eigen::VectorXd &dq = m_prediction_vel.segment(m_nax*i, m_nax);
-          // std::cout << "q: " << q.transpose() << std::endl;
-          // std::cout << "dq: " << dq.transpose() << std::endl;
-          // std::cout << "CBF constraint" << std::endl;
-          // Pinocchio kinematics 
-          //pinocchio::forwardKinematics(m_model, m_data, q, dq);
-          pinocchio::computeForwardKinematicsDerivatives(m_model, m_data, q, dq, 0.0*dq);
-          pinocchio::updateFramePlacements(m_model, m_data);
-          // std::cout << "Pinocchio kinematics done" << std::endl;
-          p_r   = m_data.oMf[frameId].translation();   // robot pos
-          
-          auto twist =  pinocchio::getFrameVelocity(m_model, m_data, frameId, pinocchio::LOCAL_WORLD_ALIGNED);
-          v_r = twist.linear();                // robot linear velocity
-          
-          // std::cout << "Distance to human: " << d << std::endl;
-          // Jacobian (linear part) -----------------------------------------------
-          // std::cout << "q:" << q.transpose() << std::endl;
-          pinocchio::computeFrameJacobian(m_model, 
-                                          m_data,
-                                          q,
-                                          frameId,
-                                          pinocchio::LOCAL_WORLD_ALIGNED, 
-                                          J);
-          Jlin = J.topRows<3>();   // 3×n
-          //Eigen::RowVectorXd Jd = e_rh.transpose() * Jlin;                 // 1×n
-
-          // computeFrameJacobianDot(m_model,
-          //         m_data,
-          //         frameId,
-          //         q,
-          //         dq,
-          //         pinocchio::LOCAL_WORLD_ALIGNED,
-          //         m_dt, // numerical differentiation step
-          //         dJ
-          //     );
-          pinocchio::computeJointJacobiansTimeVariation(m_model, 
-                                          m_data, 
-                                          q, 
-                                          dq);
+          const unsigned int frameId = m_frameIds[j];
+          const Eigen::Vector3d p_r = m_data.oMf[frameId].translation();
+          const Eigen::Vector3d v_r = pinocchio::getFrameVelocity(m_model, m_data, frameId, pinocchio::LOCAL_WORLD_ALIGNED).linear();
+          J.setZero();
+          pinocchio::getFrameJacobian(m_model, m_data, frameId, pinocchio::LOCAL_WORLD_ALIGNED, J);
+          dJ.setZero();
           pinocchio::getFrameJacobianTimeVariation(m_model, m_data, frameId, pinocchio::LOCAL_WORLD_ALIGNED, dJ);
-          // std::cout << "dJ: " << dJ << std::endl;                              
-          dJlin = dJ.topRows<3>(); // 3×n
-          // std::cout << "Jacobian computed" << std::endl;
+          const Eigen::Vector3d dJdq = dJ.topRows<3>() * dq;
 
-          //--------------------- COMPUTATION OF HUMAN DEPENDANT TERMS ------------------------
-          for (size_t k = 0; k < static_cast<size_t>(m_num_ph); ++k)
+          for (std::size_t k = 0; k < static_cast<std::size_t>(m_num_ph); ++k)
           {
-            Eigen::RowVector2d f, partial_h_on_x;
-            Eigen::Vector3d d_vec, e_rh, p_h;
-            Eigen::RowVectorXd L_g, A_barrier;
+            // Human point extrapolated with constant acceleration, as in d_min.
+            const Eigen::Vector3d& a_h = in.human_acc[k];
+            const Eigen::Vector3d p_h = p_h_vector[k] + v_h_vector[k] * t_start + 0.5 * a_h * t_start * t_start;
+            const Eigen::Vector3d v_h = v_h_vector[k] + a_h * t_start;
 
-            double d, v_rel, vh_proj, L_f, b_barrier;
-            std::vector<double> theta(2);
-            
-            Eigen::Vector3d p_h_init = p_h_vector[k]; // human position of k-esim point
-            Eigen::Vector3d v_h = v_h_vector[k]; // human velocity of k-esim point
+            const cbf::BarrierTerms b = cbf::barrierTerms(p_r, v_r, p_h, v_h, a_h, m_T_r, m_a_s, m_C);
 
-            for (size_t l = 0; l < 3; l++) // p_h prediction
+            if (b.h < h_min)
             {
-              p_h(l) = p_h_init(l) + v_h(l) * m_prediction_time(i); // human position at time t
+              h_min = b.h;
+              out.cbf.h_min = b.h;
+              out.cbf.interval = i;
+              out.cbf.frame_id = frameId;
+              out.cbf.distance = b.d;
+              out.cbf.v_rel = b.v_r;
+              out.cbf.vh_proj = b.v_h;
+              out.cbf.human_index = k;
             }
-            // std::cout << "Human position: " << p_h.transpose() << std::endl;
-            // std::cout << "Robot position: " << p_r.transpose() << std::endl;
-            d_vec = p_r - p_h;                            // to human
-            d     = std::max(1e-6, d_vec.norm());         // avoid 0
-            e_rh  = d_vec / d;                            // unit dir
-            vh_proj = e_rh.dot(v_h);                      // human velocity projected on the direction to the robot 
-            v_rel = v_r.dot(e_rh);                        // robot velocity projected on the human direction
 
-            // ---------------------------- BARRIER TERMS ---------------------------------------
-            double h_temp;                                // barrier value
-            compute_h(vh_proj, v_rel, d, h_temp); 
-
-            // std::cout << "Minimum barrier value: " << h_temp << std::endl;
-            // std::cout << "Control instant: " << i << std::endl;
-            // std::cout << "Frame ID: " << frameId << std::endl;
-            // std::cout << "Relative velocity: " << v_rel << std::endl;
-            // std::cout << "Projected velocity: " << vh_proj << std::endl;
-            // std::cout << "Distance to human: " << d << std::endl;
-            // std::cout << "Robot position: " << p_r.transpose() << std::endl;
-            // std::cout << "Human position: " << p_h.transpose() << std::endl;
-            // std::cout << "initial human position: " << p_human.transpose() << std::endl;
-            
-            if (h_temp < h_min)
-            {
-            h_min = h_temp; // update minimum barrier value
-            return_value[0] = h_temp;  // keep the minimum value
-            return_value[1] = i; // keep the index of the control interval with the minimum value
-            return_value[2] = frameId; // keep the index of the frame with the minimum value
-            return_value[3] = d; // keep the minimum distance to human
-            return_value[4] = v_rel; // keep the relative velocity
-            return_value[5] = vh_proj; // keep the projected velocity
-            h_index = k;
-            p_rmin = p_r;
-            p_h_min = p_h;
-            }
-            // std::cout << "Barrier value: " << h_temp << std::endl;
-            // std::cout << "Distance to human: " << d << std::endl;
-            // // std::cout << "d_min: " << d_min << std::endl;
-            // // std::cout << "v_rel: " << v_rel << std::endl;
-            // std::cout << "vh_proj: " << vh_proj << std::endl;
-            // std::cout << "Jlin: " << Jlin << std::endl;
-            // std::cout << "dJlin: " << dJlin << std::endl;
-            compute_theta(vh_proj, v_rel, d, theta);                // h derivatives with respect to the state
-            state_derivative = range_state_derivative(d_vec, v_r);  // state derivatives
-            f = state_derivative.first;  // 2×1
-            g = state_derivative.second;  // 2×3
-
-
-
-            partial_h_on_x << theta.at(0),                          // ∂h/∂d
-                              theta.at(1);                          // ∂h/∂v_rel
-
-            // Lie derivatives                 
-            L_f = (partial_h_on_x.dot(f));  // 1×1
-            L_g = partial_h_on_x * g;
-            // std::cout << "L_g: " << L_g << std::endl;
-            // std::cout << "partial_h_on_x: " << partial_h_on_x << std::endl;
-            // std::cout << "g: " << g << std::endl;
-
-            // ------------------------------ BARRIER TERMS ---------------------------------------
-            A_barrier = L_g * Jlin;   // 1×n
-            b_barrier = (L_g * (dJlin * dq)).value() + L_f + m_gamma * h_temp;  // scalar
-            if (b_barrier == 0.0)
-            {
-              b_barrier = 1e-6; // avoid numerical issues
-            }
-            // Eigen::RowVectorXd A_barrier = -Theta * Jd;   // 1×n  (note minus)
-            // double             b_barrier = -Jd.dot(dq) + m_gamma * m_h;
-            // std::cout << "Barrier terms computed" << std::endl;
             // Store each barrier constraint as a column: CI^T x + ci0 >= 0.
-            m_CI.col(n_cols - m_num_ph * m_nc * (j+1) + m_num_ph * i + k).segment(m_nax * i, m_nax) = A_barrier.transpose();  // A_barrier is 1×nax
-            ci0(n_cols - m_num_ph * m_nc * (j+1) + m_num_ph * i + k) = b_barrier;
+            const Eigen::Index col = n_cols - m_num_ph * m_nc * (j+1) + m_num_ph * i + k;
+            m_CI.col(col).segment(m_nax * i, m_nax) = J.topRows<3>().transpose() * b.lie_g;
+            ci0(col) = b.lie_g.dot(dJdq) + b.lie_f + m_gamma * (b.h - b.h_chi * m_delta_H);
           }
-    //       // std::cout << "CI and ci0 updated" << std::endl;
-          // std::cout << "A_barrier: " << A_barrier << std::endl;
-          // std::cout << "b_barrier: " << b_barrier << std::endl;
-          // std:: cout << "theta: " << theta.at(0) << ", " << theta.at(1) << std::endl;
-          // std:: cout << "f: " << f.transpose() << std::endl;
-          // std:: cout << "g: " << g << std::endl;
-    // //      std::cout << n_cols - m_nc + i << std::endl;
         }
-        // std::cout << m_CI.block(0,n_cols - 2*m_nc, m_CI.rows(), 2*m_nc) << std::endl;
-        // std::cout << ci0.segment(n_cols - m_nc, m_nc).transpose()  << std::endl;
       }
-      m_h = h_min; // Store the minimum barrier value
-      std::cout << "Minimum barrier value: " << m_h << std::endl;
-      std::cout << "Frame ID: " << return_value[2] << std::endl;
-      std::cout << "Control interval: " << return_value[1] << std::endl;
-      std::cout << "Distance to human: " << return_value[3] << std::endl;
-      std::cout << "human index: " << h_index << std::endl;
-      std::cout << "human point: " << p_h_min.transpose() << std::endl;
-      std::cout << "robot point: " << p_rmin.transpose() << std::endl;
-
-      // std::cout << "Relative velocity: " << return_value[4] << std::endl;
-      // std::cout << "Projected velocity: " << return_value[5] << std::endl;
+      m_h = h_min;
     }
     Eigen::Index inequality_count = m_CI.cols();
-    if (m_use_cbf && m_h > 5)
+    if (m_use_cbf && m_h > m_cbf_activation_distance)
     {
-      // TODO: make the distance threshold a parameter.
       inequality_count -= m_nc * m_frameIds.size() * m_num_ph;
     }
     const Eigen::Index equality_count = m_CE.cols();
@@ -981,7 +727,176 @@ namespace math
     // std::cout << "control intervals: " << m_control_intervals.transpose() << std::endl;
     m_next_position_forced_resp=m_position_forced_resp.topRows(m_nax);
     // std::cout << "Solution computed" << std::endl;
-    return return_value;
+  }
+
+  namespace
+  {
+    void requireSize(const Eigen::VectorXd& v, Eigen::Index size, const char* name)
+    {
+      if (v.size() != size)
+        throw std::invalid_argument(std::string(name) + " has size " + std::to_string(v.size()) +
+                                    ", expected " + std::to_string(size));
+    }
+  }
+
+  ThorQP::ThorQP ( const ThorConfig& config, const pinocchio::Model& model )
+    : ThorQP()
+  {
+    setPinocchioModel(model);
+    configure(config);
+  }
+
+  void ThorQP::configure ( const ThorConfig& config )
+  {
+    // Validate everything before touching the optimizer state.
+    if (config.n_intervals == 0 || config.n_joints == 0)
+      throw std::invalid_argument("n_intervals and n_joints must be positive");
+    if (!(config.sampling_period > 0.0) || !(config.horizon_time >= config.sampling_period))
+      throw std::invalid_argument("sampling_period must be positive and not larger than horizon_time");
+
+    Eigen::VectorXd control_intervals, prediction_time;
+    if (config.input_blocking)
+      quadraticControlIntervals(config.horizon_time, config.n_intervals, config.sampling_period,
+                                control_intervals, prediction_time);
+    else
+      constantControlIntervals(config.horizon_time, config.n_intervals, config.sampling_period,
+                               control_intervals, prediction_time);
+    if (!control_intervals.allFinite() || !(control_intervals.array() > 0.0).all())
+      throw std::invalid_argument("the horizon cannot be split into n_intervals non-empty intervals: "
+                                  "reduce n_intervals or sampling_period, or increase horizon_time");
+
+    const Eigen::Index nax = config.n_joints;
+    requireSize(config.qmax, nax, "qmax");
+    requireSize(config.qmin, nax, "qmin");
+    requireSize(config.Dqmax, nax, "Dqmax");
+    requireSize(config.DDqmax, nax, "DDqmax");
+    if (config.tau_max.size() != 0)
+      requireSize(config.tau_max, nax, "tau_max");
+    if ((config.qmin.array() > config.qmax.array()).any())
+      throw std::invalid_argument("qmin must not exceed qmax");
+    if (!(config.Dqmax.array() > 0.0).all() || (config.DDqmax.array() < 0.0).any())
+      throw std::invalid_argument("Dqmax must be positive and DDqmax non-negative");
+    if (!(config.min_scaling <= config.max_scaling))
+      throw std::invalid_argument("min_scaling must not exceed max_scaling");
+
+    if (config.cbf)
+    {
+      if (m_model.nq != static_cast<int>(nax) || m_model.nv != static_cast<int>(nax))
+        throw std::invalid_argument("the CBF needs a Pinocchio model with nq == nv == n_joints; "
+                                    "set the model before configuring");
+      if (!(config.a_s > 0.0) || !(config.C > 0.0))
+        throw std::invalid_argument("a_s and C must be positive");
+      if (!(config.T_r >= 0.0) || !(config.delta_H >= 0.0))
+        throw std::invalid_argument("T_r and delta_H must not be negative");
+      if (config.n_human_points < 0)
+        throw std::invalid_argument("n_human_points must not be negative");
+      for (const unsigned int frame_id : config.cbf_frame_ids)
+        if (frame_id >= m_model.frames.size())
+          throw std::invalid_argument("cbf frame id " + std::to_string(frame_id) + " is not in the model");
+    }
+
+    m_nc = config.n_intervals;
+    m_nax = config.n_joints;
+    m_control_horizon_time = config.horizon_time;
+    m_dt = config.sampling_period;
+    m_use_input_blocking = config.input_blocking;
+    m_sol.setZero((m_nax+1)*m_nc);
+
+    m_lambda_acc = config.lambda_acc;
+    m_lambda_tau = config.lambda_tau;
+    m_lambda_jerk = config.lambda_jerk;
+    m_lambda_scaling = config.lambda_scaling;
+    m_lambda_clik = config.lambda_clik;
+
+    m_qmax = config.qmax;
+    m_qmin = config.qmin;
+    m_Dqmax = config.Dqmax;
+    m_DDqmax = config.DDqmax;
+    m_tau_max = config.tau_max;
+    m_are_position_bounds_active = config.position_bounds;
+    m_min_scaling = config.min_scaling;
+    m_max_scaling = config.max_scaling;
+
+    m_use_cbf = config.cbf;
+    m_a_s = config.a_s;
+    m_T_r = config.T_r;
+    m_C = config.C;
+    m_gamma = config.gamma;
+    m_delta_H = config.delta_H;
+    m_cbf_activation_distance = config.cbf_activation_distance;
+    m_frameIds = config.cbf_frame_ids;
+    m_num_ph = config.n_human_points;
+
+    updateMatrices();
+  }
+
+  ThorOutput ThorQP::solve ( const ThorInput& in )
+  {
+    if (needUpdate())
+      throw std::logic_error("the QP matrices are outdated: call configure() or updateMatrices() first");
+
+    requireSize(in.target_dq, static_cast<Eigen::Index>(m_nax) * m_nc, "target_dq");
+    requireSize(in.next_target_q, m_nax, "next_target_q");
+    requireSize(in.x0, 2 * static_cast<Eigen::Index>(m_nax), "x0");
+
+    ThorOutput out;
+    if (!m_use_cbf)
+    {
+      doSolve(in, out);
+      return out;
+    }
+    ThorInput with_defaults = in;
+    if (in.human_pos.empty() && in.human_vel.empty() && in.human_acc.empty())
+    {
+      // No human data: assume n_human_points far-away, still humans.
+      with_defaults.human_pos.assign(m_num_ph, Eigen::Vector3d::Constant(100.0));
+      with_defaults.human_vel.assign(m_num_ph, Eigen::Vector3d::Zero());
+    }
+    if (in.human_acc.empty())
+      with_defaults.human_acc.assign(with_defaults.human_pos.size(), Eigen::Vector3d::Zero());
+    const std::size_t n_human = with_defaults.human_pos.size();
+    if (with_defaults.human_vel.size() != n_human || with_defaults.human_acc.size() != n_human ||
+        n_human < static_cast<std::size_t>(m_num_ph))
+    {
+      throw std::invalid_argument("human_pos, human_vel and human_acc (if given) must have the same size, "
+                                  "at least n_human_points (" + std::to_string(m_num_ph) + ")");
+    }
+    doSolve(with_defaults, out);
+    return out;
+  }
+
+  std::vector<double> ThorQP::toLegacyDiagnostics ( const CbfDiagnostics& cbf )
+  {
+    return {cbf.h_min, static_cast<double>(cbf.interval), static_cast<double>(cbf.frame_id),
+            cbf.distance, cbf.v_rel, cbf.vh_proj};
+  }
+
+  std::vector<double> ThorQP::computedCostrainedSolution ( const Eigen::VectorXd& targetDq,
+                                                           const Eigen::VectorXd& next_targetQ,
+                                                           const double& target_scaling,
+                                                           const Eigen::VectorXd& x0,
+                                                           Eigen::VectorXd& next_acc,
+                                                           double& next_scaling,
+                                                           const std::vector<Eigen::Vector3d> &v_h_vector,
+                                                           const std::vector<Eigen::Vector3d> &p_h_vector )
+  {
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_h_vector, v_h_vector, {}});
+    next_acc = out.next_acc;
+    next_scaling = out.next_scaling;
+    return toLegacyDiagnostics(out.cbf);
+  }
+
+  std::vector<double> ThorQP::computedCostrainedSolution ( const Eigen::VectorXd& targetDq,
+                                                           const Eigen::VectorXd& next_targetQ,
+                                                           const double& target_scaling,
+                                                           const Eigen::VectorXd& x0,
+                                                           Eigen::VectorXd& next_acc,
+                                                           double& next_scaling )
+  {
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}});
+    next_acc = out.next_acc;
+    next_scaling = out.next_scaling;
+    return toLegacyDiagnostics(out.cbf);
   }
 
   bool ThorQP::computedUncostrainedSolution ( const Eigen::VectorXd& targetDq,

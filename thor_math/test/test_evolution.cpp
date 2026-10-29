@@ -13,29 +13,44 @@ namespace {
 class InspectableThorQP : public ThorQP
 {
 public:
-  using ThorQP::compute_h;
-  using ThorQP::compute_theta;
-
   bool torqueBoundsActive() const { return m_are_torque_bounds_active; }
   bool cbfBoundsActive() const { return m_use_cbf; }
-  bool cbfMoveAwayActive() const { return m_use_cbf_move_away; }
   bool inputBlockingActive() const { return m_use_input_blocking; }
   Eigen::Index inequalityCount() const { return m_CI.cols(); }
 };
 
-void configureQp(InspectableThorQP& qp, bool input_blocking = true)
+ThorConfig makeConfig(bool input_blocking = true)
 {
-  constexpr unsigned int axes = 2;
-  constexpr unsigned int intervals = 3;
-  qp.setIntervals(intervals, axes, 0.3, 0.05, input_blocking);
-  qp.setConstraints(Eigen::VectorXd::Constant(axes, 2.0),
-                    Eigen::VectorXd::Constant(axes, -2.0),
-                    Eigen::VectorXd::Constant(axes, 3.0),
-                    Eigen::VectorXd::Constant(axes, 10.0),
-                    Eigen::VectorXd::Constant(axes, 20.0));
-  qp.setWeigthFunction(1e-3, 0.0, 1e-4, 10.0, 1.0);
-  qp.setCBFParameters(2.5, 0.15, 0.5, 3.0);
-  qp.setCbfIds({}, 0);
+  ThorConfig config;
+  config.n_intervals = 3;
+  config.n_joints = 2;
+  config.horizon_time = 0.3;
+  config.sampling_period = 0.05;
+  config.input_blocking = input_blocking;
+  config.lambda_acc = 1e-3;
+  config.lambda_jerk = 1e-4;
+  config.lambda_scaling = 10.0;
+  config.lambda_clik = 1.0;
+  config.qmax = Eigen::VectorXd::Constant(2, 2.0);
+  config.qmin = Eigen::VectorXd::Constant(2, -2.0);
+  config.Dqmax = Eigen::VectorXd::Constant(2, 3.0);
+  config.DDqmax = Eigen::VectorXd::Constant(2, 10.0);
+  config.tau_max = Eigen::VectorXd::Constant(2, 20.0);
+  config.a_s = 2.5;
+  config.T_r = 0.15;
+  config.C = 0.5;
+  config.gamma = 3.0;
+  return config;
+}
+
+ThorInput makeInput()
+{
+  ThorInput in;
+  in.target_dq = Eigen::VectorXd::Constant(6, 0.5);
+  in.next_target_q = Eigen::Vector2d(0.1, -0.1);
+  in.target_scaling = 1.0;
+  in.x0 = Eigen::Vector4d(0.0, 0.0, 0.2, -0.2);
+  return in;
 }
 
 TEST(EvolutionMatrix, FreeAndForcedResponsesHaveExpectedShapeAndValues)
@@ -174,38 +189,27 @@ TEST(ControlIntervals, BuildsQuadraticAndRoundedConstantSchedules)
   EXPECT_DOUBLE_EQ(prediction(2), 0.9);
 }
 
-TEST(ThorQp, SettersUpdateFlagsAndMatrixLayout)
+TEST(ThorQp, ConfigureSetsFlagsAndMatrixLayout)
 {
   InspectableThorQP qp;
-  configureQp(qp);
   EXPECT_TRUE(qp.needUpdate());
+
+  ThorConfig config = makeConfig();
+  config.position_bounds = true;
+  ASSERT_NO_THROW(qp.configure(config));
+  EXPECT_FALSE(qp.needUpdate());
   EXPECT_TRUE(qp.inputBlockingActive());
+  EXPECT_TRUE(qp.arePositionBoundsActive());
+  EXPECT_FALSE(qp.cbfBoundsActive());
   EXPECT_DOUBLE_EQ(qp.getDt(), 0.05);
   EXPECT_DOUBLE_EQ(qp.getNumPh(), 0.0);
-
-  qp.activatePositionBounds(true);
-  qp.activateTorqueBounds(true);
-  qp.activateCbfBounds(true);
-  qp.activateCbfMoveAway(true);
-  EXPECT_TRUE(qp.arePositionBoundsActive());
-  EXPECT_TRUE(qp.torqueBoundsActive());
-  EXPECT_TRUE(qp.cbfBoundsActive());
-  EXPECT_TRUE(qp.cbfMoveAwayActive());
-
-  qp.setCbfIds({}, 0);
-  ASSERT_NO_THROW(qp.updateMatrices());
-  EXPECT_FALSE(qp.needUpdate());
   EXPECT_EQ(qp.getPredictionTimeInstant().size(), 3);
   EXPECT_EQ(qp.inequalityCount(), 8 * 3 * 2 + 2 * 3);
 
-  qp.activatePositionBounds(false);
-  qp.activateTorqueBounds(false);
-  qp.activateCbfBounds(false);
-  qp.activateCbfMoveAway(false);
+  config.position_bounds = false;
+  ASSERT_NO_THROW(qp.configure(config));
   EXPECT_FALSE(qp.arePositionBoundsActive());
-  EXPECT_FALSE(qp.torqueBoundsActive());
-  EXPECT_FALSE(qp.cbfBoundsActive());
-  EXPECT_FALSE(qp.cbfMoveAwayActive());
+  EXPECT_EQ(qp.inequalityCount(), 4 * 3 * 2 + 2 * 3);
 }
 
 TEST(ThorQp, InitializesAndIntegratesState)
@@ -213,8 +217,7 @@ TEST(ThorQp, InitializesAndIntegratesState)
   InspectableThorQP qp;
   EXPECT_EQ(qp.getFirstPredictionPos().size(), 0);
   EXPECT_EQ(qp.getFirstPredictionVel().size(), 0);
-  configureQp(qp, false);
-  qp.updateMatrices();
+  qp.configure(makeConfig(false));
   EXPECT_FALSE(qp.inputBlockingActive());
 
   Eigen::Vector4d state;
@@ -234,8 +237,7 @@ TEST(ThorQp, InitializesAndIntegratesState)
 TEST(ThorQp, ComputesFiniteUnconstrainedSolution)
 {
   InspectableThorQP qp;
-  configureQp(qp, false);
-  qp.updateMatrices();
+  qp.configure(makeConfig(false));
   const Eigen::Vector4d state = Eigen::Vector4d::Zero();
   qp.setInitialState(state);
 
@@ -247,31 +249,6 @@ TEST(ThorQp, ComputesFiniteUnconstrainedSolution)
   ASSERT_EQ(acceleration.size(), 2);
   EXPECT_TRUE(acceleration.allFinite());
   EXPECT_TRUE(std::isfinite(scaling));
-}
-
-TEST(ThorQp, ComputesBarrierValuesAndDerivativesForAllModes)
-{
-  InspectableThorQP qp;
-  configureQp(qp);
-  std::vector<double> theta(2);
-  double h = 0.0;
-
-  qp.compute_h(0.2, -0.1, 1.0, h);
-  qp.compute_theta(0.2, -0.1, 1.0, theta);
-  EXPECT_TRUE(std::isfinite(h));
-  EXPECT_DOUBLE_EQ(theta[0], 1.0);
-  EXPECT_TRUE(std::isfinite(theta[1]));
-
-  qp.compute_h(0.0, 0.2, 1.0, h);
-  qp.compute_theta(0.0, 0.2, 1.0, theta);
-  EXPECT_TRUE(std::isfinite(h));
-  EXPECT_DOUBLE_EQ(theta[1], 0.15);
-
-  qp.activateCbfMoveAway(true);
-  qp.compute_h(0.1, 0.2, 1.0, h);
-  qp.compute_theta(0.1, 0.2, 1.0, theta);
-  EXPECT_TRUE(std::isfinite(h));
-  EXPECT_DOUBLE_EQ(theta[0], 1.0);
 }
 
 TEST(QuadraticProgram, SolvesEqualityAndInequalityConstraints)
@@ -347,6 +324,198 @@ TEST(QuadraticProgram, ReportsInfeasibleConstraints)
   EXPECT_THROW(solver.solve(solution, hessian, gradient, constraints, lower, upper),
                std::runtime_error);
 }
+
+TEST(ThorQpConfig, ConstructorConfigures)
+{
+  ThorQP qp(makeConfig());
+  EXPECT_FALSE(qp.needUpdate());
+  EXPECT_DOUBLE_EQ(qp.getDt(), 0.05);
+}
+
+TEST(ThorQpConfig, RejectsInvalidSettingsWithoutChangingState)
+{
+  InspectableThorQP qp;
+  ASSERT_NO_THROW(qp.configure(makeConfig()));
+  const Eigen::Index inequalities = qp.inequalityCount();
+
+  const auto expectRejected = [&](const char* what, auto&& modify) {
+    SCOPED_TRACE(what);
+    ThorConfig config = makeConfig();
+    modify(config);
+    EXPECT_THROW(qp.configure(config), std::invalid_argument);
+    EXPECT_FALSE(qp.needUpdate());
+    EXPECT_EQ(qp.inequalityCount(), inequalities);
+    EXPECT_DOUBLE_EQ(qp.getDt(), 0.05);
+  };
+
+  expectRejected("no intervals", [](ThorConfig& c) { c.n_intervals = 0; });
+  expectRejected("no joints", [](ThorConfig& c) { c.n_joints = 0; });
+  expectRejected("zero sampling period", [](ThorConfig& c) { c.sampling_period = 0.0; });
+  expectRejected("horizon shorter than one sample",
+                 [](ThorConfig& c) { c.horizon_time = 0.01; });
+  expectRejected("zero-length quadratic intervals", [](ThorConfig& c) {
+    c.horizon_time = 0.1;
+    c.sampling_period = 0.01;
+    c.n_intervals = 15;
+  });
+  expectRejected("single quadratic interval", [](ThorConfig& c) { c.n_intervals = 1; });
+  expectRejected("wrong qmax size", [](ThorConfig& c) { c.qmax = Eigen::VectorXd::Ones(3); });
+  expectRejected("missing DDqmax", [](ThorConfig& c) { c.DDqmax.resize(0); });
+  expectRejected("wrong tau_max size", [](ThorConfig& c) { c.tau_max = Eigen::VectorXd::Ones(1); });
+  expectRejected("qmin above qmax", [](ThorConfig& c) { c.qmin(0) = 3.0; });
+  expectRejected("zero velocity limit", [](ThorConfig& c) { c.Dqmax(1) = 0.0; });
+  expectRejected("negative acceleration limit", [](ThorConfig& c) { c.DDqmax(1) = -1.0; });
+  expectRejected("inverted scaling bounds", [](ThorConfig& c) {
+    c.min_scaling = 1.0;
+    c.max_scaling = 0.5;
+  });
+  expectRejected("CBF without a model", [](ThorConfig& c) { c.cbf = true; });
+
+  ThorConfig empty_tau = makeConfig();
+  empty_tau.tau_max.resize(0);
+  EXPECT_NO_THROW(qp.configure(empty_tau));
+}
+
+TEST(ThorQpConfig, SolveValidatesInputs)
+{
+  ThorQP unconfigured;
+  EXPECT_THROW(unconfigured.solve(makeInput()), std::logic_error);
+
+  ThorQP qp(makeConfig());
+  qp.setInitialState(makeInput().x0);
+  const auto expectRejected = [&](const char* what, auto&& modify) {
+    SCOPED_TRACE(what);
+    ThorInput in = makeInput();
+    modify(in);
+    EXPECT_THROW(qp.solve(in), std::invalid_argument);
+  };
+  expectRejected("target_dq for one interval",
+                 [](ThorInput& in) { in.target_dq = Eigen::Vector2d::Zero(); });
+  expectRejected("next_target_q too long",
+                 [](ThorInput& in) { in.next_target_q = Eigen::Vector3d::Zero(); });
+  expectRejected("x0 without velocities",
+                 [](ThorInput& in) { in.x0 = Eigen::Vector2d::Zero(); });
+}
+
+TEST(ThorQpConfig, ScalingBoundsAreConfigurable)
+{
+  ThorConfig config = makeConfig(false);
+  config.min_scaling = 0.2;
+  config.max_scaling = 0.5;
+  ThorQP qp(config);
+
+  ThorInput in = makeInput();
+  in.target_scaling = 1.0;
+  qp.setInitialState(in.x0);
+  ThorOutput out;
+  ASSERT_NO_THROW(out = qp.solve(in));
+  EXPECT_GE(out.next_scaling, 0.2 - 1e-8);
+  EXPECT_LE(out.next_scaling, 0.5 + 1e-8);
+  EXPECT_GT(out.next_scaling, 0.5 - 1e-3);  // the target pulls it to the upper bound
+}
+
+// ---------------------------------------------------------------------------
+// Deprecated API: these tests keep the legacy setters and
+// computedCostrainedSolution wrappers working until they are removed.
+// ---------------------------------------------------------------------------
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
+// Same settings as makeConfig.
+void configureQp(InspectableThorQP& qp, bool input_blocking = true)
+{
+  constexpr unsigned int axes = 2;
+  constexpr unsigned int intervals = 3;
+  qp.setIntervals(intervals, axes, 0.3, 0.05, input_blocking);
+  qp.setConstraints(Eigen::VectorXd::Constant(axes, 2.0),
+                    Eigen::VectorXd::Constant(axes, -2.0),
+                    Eigen::VectorXd::Constant(axes, 3.0),
+                    Eigen::VectorXd::Constant(axes, 10.0),
+                    Eigen::VectorXd::Constant(axes, 20.0));
+  qp.setWeigthFunction(1e-3, 0.0, 1e-4, 10.0, 1.0);
+  qp.setCBFParameters(2.5, 0.15, 0.5, 3.0);
+  qp.setCbfIds({}, 0);
+}
+
+TEST(LegacyApi, SettersUpdateFlagsAndMatrixLayout)
+{
+  InspectableThorQP qp;
+  configureQp(qp);
+  EXPECT_TRUE(qp.needUpdate());
+  EXPECT_TRUE(qp.inputBlockingActive());
+  EXPECT_DOUBLE_EQ(qp.getDt(), 0.05);
+  EXPECT_DOUBLE_EQ(qp.getNumPh(), 0.0);
+
+  qp.activatePositionBounds(true);
+  qp.activateTorqueBounds(true);
+  qp.activateCbfBounds(true);
+  qp.activateCbfMoveAway(true);
+  EXPECT_TRUE(qp.arePositionBoundsActive());
+  EXPECT_TRUE(qp.torqueBoundsActive());
+  EXPECT_TRUE(qp.cbfBoundsActive());
+
+  qp.setCbfIds({}, 0);
+  ASSERT_NO_THROW(qp.updateMatrices());
+  EXPECT_FALSE(qp.needUpdate());
+  EXPECT_EQ(qp.getPredictionTimeInstant().size(), 3);
+  EXPECT_EQ(qp.inequalityCount(), 8 * 3 * 2 + 2 * 3);
+
+  qp.activatePositionBounds(false);
+  qp.activateTorqueBounds(false);
+  qp.activateCbfBounds(false);
+  qp.activateCbfMoveAway(false);
+  EXPECT_FALSE(qp.arePositionBoundsActive());
+  EXPECT_FALSE(qp.torqueBoundsActive());
+  EXPECT_FALSE(qp.cbfBoundsActive());
+}
+
+TEST(LegacyApi, MatchesConfigureAndSolve)
+{
+  for (const bool input_blocking : {true, false}) {
+    SCOPED_TRACE(input_blocking);
+    InspectableThorQP legacy;
+    configureQp(legacy, input_blocking);
+    legacy.updateMatrices();
+
+    InspectableThorQP configured;
+    ASSERT_NO_THROW(configured.configure(makeConfig(input_blocking)));
+    EXPECT_EQ(configured.inequalityCount(), legacy.inequalityCount());
+
+    const ThorInput in = makeInput();
+    legacy.setInitialState(in.x0);
+    configured.setInitialState(in.x0);
+
+    // Two cycles, so the jerk term sees a nonzero previous solution.
+    for (int cycle = 0; cycle < 2; ++cycle) {
+      Eigen::VectorXd acceleration;
+      double scaling = 0.0;
+      std::vector<double> diagnostics;
+      ASSERT_NO_THROW(diagnostics = legacy.computedCostrainedSolution(
+        in.target_dq, in.next_target_q, in.target_scaling, in.x0,
+        acceleration, scaling));
+      ThorOutput out;
+      ASSERT_NO_THROW(out = configured.solve(in));
+      EXPECT_TRUE(out.next_acc.isApprox(acceleration, 1e-12));
+      EXPECT_DOUBLE_EQ(out.next_scaling, scaling);
+      EXPECT_EQ(diagnostics, std::vector<double>(6, 0.0));
+      EXPECT_DOUBLE_EQ(out.cbf.h_min, 0.0);
+    }
+  }
+}
+
+TEST(LegacyApi, SolveRejectsOutdatedMatrices)
+{
+  ThorQP qp(makeConfig());
+  qp.setInitialState(makeInput().x0);
+  qp.setWeigthFunction(1e-3, 0.0, 1e-4, 10.0, 2.0);
+  EXPECT_THROW(qp.solve(makeInput()), std::logic_error);
+}
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 }  // namespace
 }  // namespace thor::math

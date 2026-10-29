@@ -27,12 +27,17 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_UNIT_TESTS "Build the unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build the integration test executable" OFF)
+option(BUILD_EXAMPLES "Build the examples" OFF)
+option(BUILD_DOCS "Add the thor_math_docs target (Doxygen HTML reference)" OFF)
 option(ENABLE_COVERAGE "Enable source-based test coverage instrumentation" OFF)
 
 find_package(Eigen3 REQUIRED COMPONENTS Core Dense Geometry)
 find_package(pinocchio REQUIRED CONFIG)
 
-add_library(thor_math SHARED src/thor_math/thor_math.cpp)
+add_library(thor_math SHARED
+  src/thor_math/cbf.cpp
+  src/thor_math/thor_math.cpp
+)
 add_library(thor_math::thor_math ALIAS thor_math)
 
 target_compile_features(thor_math PUBLIC cxx_std_20)
@@ -86,7 +91,7 @@ endif()
 if(BUILD_UNIT_TESTS)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-  add_executable(thor_math_unit_tests test/test_evolution.cpp)
+  add_executable(thor_math_unit_tests test/test_evolution.cpp test/test_cbf.cpp)
   target_link_libraries(thor_math_unit_tests
     PRIVATE
       thor_math::thor_math
@@ -118,6 +123,28 @@ if(BUILD_INTEGRATION_TESTS)
   gtest_discover_tests(thor_math_integration_test
     TEST_PREFIX "thor_math.integration."
     DISCOVERY_TIMEOUT 30
+  )
+endif()
+
+if(BUILD_EXAMPLES)
+  add_executable(thor_math_cbf_mpc_example examples/cbf_mpc_example.cpp)
+  target_link_libraries(thor_math_cbf_mpc_example PRIVATE thor_math::thor_math)
+  target_compile_definitions(thor_math_cbf_mpc_example
+    PRIVATE
+      THOR_MATH_EXAMPLE_URDF="${CMAKE_CURRENT_SOURCE_DIR}/test/data/ur10/ur10_with_intermediates.urdf"
+  )
+endif()
+
+if(BUILD_DOCS)
+  find_package(Doxygen REQUIRED)
+  set(THOR_MATH_DOCS_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/docs")
+  configure_file(docs/Doxyfile.in "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile" @ONLY)
+  add_custom_target(thor_math_docs
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${THOR_MATH_DOCS_OUTPUT_DIR}"
+    COMMAND Doxygen::doxygen "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Generating the thor_math API reference in ${THOR_MATH_DOCS_OUTPUT_DIR}/html"
+    VERBATIM
   )
 endif()
 
