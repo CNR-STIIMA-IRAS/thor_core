@@ -65,7 +65,9 @@ def launch_setup(context):
         Node(package='thor_bringup', executable='thor_markers.py', condition=IfCondition(demo),
              parameters=[{'controllers_file': controllers, 'controller': mpc_controller}]),
         Node(package='rviz2', executable='rviz2', condition=IfCondition(rviz),
-             arguments=['-d', PathJoinSubstitution([share, 'rviz', 'thor_demo.rviz'])]),
+             arguments=['-d', PathJoinSubstitution([share, 'rviz', 'thor_demo.rviz'])],
+             additional_env={'QT_QPA_PLATFORM': 'xcb'}),
+
     ]
 
 
