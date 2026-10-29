@@ -208,6 +208,91 @@ TEST(CbfBarrierTerms, OverlappingSpheresGiveNegativeDistance)
   EXPECT_LT(b.h, 0.0);
 }
 
+// Capsules: beyond the ends they are spheres centered at the ends, along the
+// side the distance is measured from the axis.
+TEST(CbfCapsuleBarrierTerms, ReducesToSpheresAndToTheAxisDistance)
+{
+  const Eigen::Vector3d p_o(0.0, 0.0, 1.0), half_axis(0.0, 0.0, 0.5);
+  const Eigen::Vector3d v_o(0.3, 0.0, 0.2), a_o(0.0, 0.1, -0.4);
+  const Eigen::Vector3d v_r(-0.5, 0.1, 0.7);
+  const double radius = 0.2;
+
+  // Above the top end: the sphere at the top end.
+  const Eigen::Vector3d above(0.3, 0.2, 1.8);
+  const BarrierTerms top = capsuleBarrierTerms(above, v_r, p_o, half_axis, v_o, a_o, kTr, kAs, kC, radius);
+  const BarrierTerms top_sphere = barrierTerms(above, v_r, p_o + half_axis, v_o, a_o, kTr, kAs, kC, radius);
+  EXPECT_DOUBLE_EQ(top.h, top_sphere.h);
+  EXPECT_TRUE(top.lie_g.isApprox(top_sphere.lie_g));
+
+  // Along the side: the distance from the axis, and the axial components of
+  // the velocities do not matter.
+  const Eigen::Vector3d side(1.0, 0.0, 1.3);
+  const BarrierTerms b = capsuleBarrierTerms(side, v_r, p_o, half_axis, v_o, a_o, kTr, kAs, kC, radius);
+  EXPECT_NEAR(b.d, 1.0 - radius, 1e-12);
+  EXPECT_DOUBLE_EQ(b.v_r, -0.5);
+  EXPECT_DOUBLE_EQ(b.v_o, 0.3);
+  EXPECT_NEAR(b.lie_g.z(), 0.0, 1e-12);
+  EXPECT_NEAR(b.grad_p.z(), 0.0, 1e-12);
+  const Eigen::Vector3d axial(0.0, 0.0, 1.0);
+  const BarrierTerms shifted = capsuleBarrierTerms(side, v_r + axial, p_o, half_axis, v_o - axial, a_o + axial,
+                                                   kTr, kAs, kC, radius);
+  EXPECT_NEAR(shifted.h, b.h, 1e-12);
+  EXPECT_NEAR(shifted.lie_f, b.lie_f, 1e-12);
+
+  // Zero axis: a sphere.
+  const BarrierTerms sphere = capsuleBarrierTerms(side, v_r, p_o, Eigen::Vector3d::Zero(), v_o, a_o, kTr, kAs, kC, radius);
+  EXPECT_DOUBLE_EQ(sphere.h, barrierTerms(side, v_r, p_o, v_o, a_o, kTr, kAs, kC, radius).h);
+
+  // Robot center on the axis: u is orthogonal to the axis.
+  const BarrierTerms inside = capsuleBarrierTerms(p_o, v_r, p_o, half_axis, v_o, a_o, kTr, kAs, kC, radius);
+  EXPECT_NEAR(inside.d, -radius, 1e-9);
+  EXPECT_NEAR(inside.lie_g.dot(half_axis), 0.0, 1e-12);
+  EXPECT_TRUE(inside.lie_g.allFinite());
+}
+
+// As for spheres, the Lie derivatives and the state gradients must match finite
+// differences, on the side and beyond the ends, with a tilted axis.
+TEST(CbfCapsuleBarrierTerms, DerivativesMatchFiniteDifferences)
+{
+  struct Case { Eigen::Vector3d p_r, v_r, a_r, p_o, half_axis, v_o, a_o; };
+  const std::array<Case, 4> cases = {{
+    // side
+    {{0.5, 0.2, 0.8}, {-0.3, 0.1, 0.05}, {1.0, -2.0, 0.5}, {1.2, 0.0, 0.9}, {0.1, 0.2, 0.6}, {-0.4, 0.2, 0.0}, {0.5, -1.0, 0.2}},
+    {{0.3, -0.1, 0.5}, {0.2, 0.3, 0.0}, {-3.0, 0.0, 1.0}, {0.4, 0.0, 0.5}, {0.0, 0.0, 0.8}, {0.1, 0.0, 0.0}, {0.0, 0.0, 0.0}},
+    // beyond the top end
+    {{0.0, 0.0, 1.9}, {0.8, 0.0, -0.6}, {0.0, 4.0, 0.0}, {0.5, 0.3, 0.8}, {0.0, 0.1, 0.5}, {-1.0, -0.2, 0.3}, {0.3, 0.0, -0.4}},
+    // beyond the bottom end
+    {{1.0, 0.4, -0.6}, {-0.2, 0.0, 0.4}, {0.5, 0.5, -1.0}, {0.8, 0.2, 0.5}, {-0.1, 0.0, 0.6}, {0.0, 0.3, 0.0}, {0.0, 0.0, 0.0}},
+  }};
+  constexpr double eps = 1e-6;
+  for (const double radius : {0.0, 0.1}) {
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+      SCOPED_TRACE(::testing::Message() << "radius " << radius << " case " << index);
+      const Case& c = cases[index];
+      auto terms = [&](const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r,
+                       const Eigen::Vector3d& p_o, const Eigen::Vector3d& v_o) {
+        return capsuleBarrierTerms(p_r, v_r, p_o, c.half_axis, v_o, c.a_o, kTr, kAs, kC, radius);
+      };
+      const BarrierTerms b = terms(c.p_r, c.v_r, c.p_o, c.v_o);
+
+      auto h_at = [&](double t) {
+        return terms(c.p_r + c.v_r * t + 0.5 * c.a_r * t * t, c.v_r + c.a_r * t,
+                     c.p_o + c.v_o * t + 0.5 * c.a_o * t * t, c.v_o + c.a_o * t).h;
+      };
+      EXPECT_NEAR(b.lie_f + b.lie_g.dot(c.a_r), (h_at(eps) - h_at(-eps)) / (2.0 * eps), 1e-6);
+
+      Eigen::Vector3d grad_p, grad_v;
+      for (Eigen::Index i = 0; i < 3; ++i) {
+        const Eigen::Vector3d e = eps * Eigen::Vector3d::Unit(i);
+        grad_p(i) = (terms(c.p_r + e, c.v_r, c.p_o, c.v_o).h - terms(c.p_r - e, c.v_r, c.p_o, c.v_o).h) / (2.0 * eps);
+        grad_v(i) = (terms(c.p_r, c.v_r + e, c.p_o, c.v_o).h - terms(c.p_r, c.v_r - e, c.p_o, c.v_o).h) / (2.0 * eps);
+      }
+      EXPECT_TRUE(b.grad_p.isApprox(grad_p, 1e-6)) << b.grad_p.transpose() << " vs " << grad_p.transpose();
+      EXPECT_TRUE(b.lie_g.isApprox(grad_v, 1e-6)) << b.lie_g.transpose() << " vs " << grad_v.transpose();
+    }
+  }
+}
+
 // Reference values printed by cbf_python/controllers/kernels/ssm_cbf_acc.py
 // (branch dynamic_parameters) with T_r = 0.15, a_s = 2.5, C = 0.1.
 TEST(CbfPythonReference, MinimumDistanceAndBarrier)

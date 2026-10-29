@@ -10,7 +10,7 @@ Core libraries for THOR.
 
 ## Packages
 
-- `thor_math`: math utilities built on Eigen and Pinocchio.
+- `thor_math`: math utilities built on Eigen and Pinocchio, including `ThorQP`, an MPC for manipulators that scales the speed of a nominal trajectory and keeps a safe distance from dynamic obstacles (spheres or capsules) through a control barrier function.
 
 ## Dependencies
 
@@ -56,7 +56,7 @@ cmake -S <your app> -B <build> -DCMAKE_PREFIX_PATH=install/x86-64-v3
 
 ## Example
 
-[thor_math/examples/cbf_mpc_example.cpp](thor_math/examples/cbf_mpc_example.cpp) runs the MPC with the control barrier function on a UR10 covered by spheres, among a walking person (torso and hand spheres) and a static fixture. Run it again with `--no-cbf` to compare, or with `--continuous-cbf` to use the continuous-time CBF of the paper instead of the discrete-time one along the horizon:
+[thor_math/examples/cbf_mpc_example.cpp](thor_math/examples/cbf_mpc_example.cpp) runs the MPC with the control barrier function on a UR10 covered by spheres, among a walking person (a vertical capsule for the body, a sphere for the hand) and a static fixture. Run it again with `--no-cbf` to compare, or with `--continuous-cbf` to use the continuous-time CBF of the paper instead of the discrete-time one along the horizon:
 
 ```bash
 cmake -S thor_math -B build/thor_math -DBUILD_EXAMPLES=ON

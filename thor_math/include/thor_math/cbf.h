@@ -19,7 +19,8 @@
  * stops (a person, a vehicle, another robot, a static object).
  *
  * The robot point and the obstacle point are spheres of radii `r_r` and `r_o`
- * (zero for points). With `u = (p_r - p_o)/|p_r - p_o|` the barrier depends on
+ * (zero for points); obstacles can also be capsules, see capsuleBarrierTerms().
+ * With `u = (p_r - p_o)/|p_r - p_o|` the barrier depends on
  * `psi = [d, v_r, v_o, a_o]`:
  * - `d = |p_r - p_o| - r_r - r_o` distance between the surfaces [m];
  * - `v_r` robot velocity along `u` [m/s] (negative: approaching);
@@ -82,7 +83,7 @@ double barrier( double d, double v_r, double v_o, double a_o,
                 double T_r, double a_s, double C, double atol,
                 Eigen::Vector4d& jacobian );
 
-/// @brief Barrier value and Lie derivatives of one robot-obstacle pair, from barrierTerms().
+/// @brief Barrier value and Lie derivatives of one robot-obstacle pair, from barrierTerms() or capsuleBarrierTerms().
 struct BarrierTerms
 {
   double          h     = 0.0;  ///< Barrier value [m].
@@ -90,7 +91,7 @@ struct BarrierTerms
   Eigen::Vector3d lie_g = Eigen::Vector3d::Zero();  ///< `L_g h`: `dh/dt = L_f h + L_g h . a_r` [s]. It is also `dh/dv_r`, the gradient with respect to the robot center velocity.
   Eigen::Vector3d grad_p = Eigen::Vector3d::Zero(); ///< `dh/dp_r`: gradient with respect to the robot center position, obstacle fixed.
   double          h_chi = 0.0;  ///< `dh/dd`, sensitivity of `h` to a distance error.
-  double          d     = 0.0;  ///< Distance between the sphere surfaces [m] (negative if they overlap).
+  double          d     = 0.0;  ///< Distance between the surfaces [m] (negative if they overlap).
   double          v_r   = 0.0;  ///< Robot velocity along `u` [m/s].
   double          v_o   = 0.0;  ///< Obstacle velocity along `u` [m/s].
   double          a_o   = 0.0;  ///< Obstacle acceleration along `u` [m/s^2].
@@ -123,6 +124,42 @@ BarrierTerms barrierTerms( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_
                            double radius = 0.0, double atol = 1e-12 );
 
 /**
+ * @brief Barrier value and Lie derivatives of a robot sphere and an obstacle
+ *        capsule (a cylinder with hemispherical ends).
+ *
+ * The capsule axis is the segment from `p_o - half_axis` to `p_o + half_axis`;
+ * the obstacle translates rigidly with @p v_o and @p a_o, without rotating.
+ * The barrier uses the distance between the surfaces, `d = |p_r - c| - radius`,
+ * where `c` is the point of the axis closest to `p_r`, and `u = (p_r - c)/|p_r - c|`:
+ * - beyond an end, `c` is that end and the result is barrierTerms() of the
+ *   sphere centered there;
+ * - along the side, `c` slides on the axis: the result is barrierTerms() of
+ *   the positions, velocities and accelerations projected on the plane
+ *   orthogonal to the axis. It is exact, since the robot motion along the axis
+ *   does not change the distance.
+ *
+ * `d` and its gradient are continuous across the two regions. A capsule with
+ * a long axis models a cylinder whose ends are never reached (e.g. a person
+ * from the floor to the head, or a column).
+ *
+ * If @p half_axis is (numerically) zero this is barrierTerms(). If `p_r` is on
+ * the axis, `u` is a direction orthogonal to it.
+ *
+ * @param p_r, v_r       robot sphere center position [m] and velocity [m/s].
+ * @param p_o            capsule center (axis midpoint) [m].
+ * @param half_axis      vector from the center to one end of the axis [m].
+ * @param v_o, a_o       capsule velocity [m/s] and acceleration [m/s^2].
+ * @param T_r, a_s, C    as in barrier().
+ * @param radius         sum of the robot sphere and capsule radii `r_r + r_o` [m].
+ * @param atol           as in minimumDistance().
+ */
+BarrierTerms capsuleBarrierTerms( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r,
+                                  const Eigen::Vector3d& p_o, const Eigen::Vector3d& half_axis,
+                                  const Eigen::Vector3d& v_o, const Eigen::Vector3d& a_o,
+                                  double T_r, double a_s, double C,
+                                  double radius = 0.0, double atol = 1e-12 );
+
+/**
  * @brief Maximum error of the estimated robot-obstacle distance (Eq. 9 of the paper).
  *
  * `delta_H = beta (sigma_p + sigma_v T_f_bar + sigma_a T_f_bar^2 / 2)`: the
@@ -137,7 +174,7 @@ BarrierTerms barrierTerms( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_
  * @return `delta_H` [m], to be used as ThorConfig::delta_H or
  *         ThorInput::obstacle_delta_H. The barrier is evaluated at the
  *         worst-case distance `d - delta_H`, which is the same as inflating the
- *         obstacle sphere by `delta_H`.
+ *         obstacle (sphere or capsule) by `delta_H`.
  */
 double perceptionMargin( double beta, double sigma_p, double sigma_v, double sigma_a, double T_f_bar );
 

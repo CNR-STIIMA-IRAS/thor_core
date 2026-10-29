@@ -232,7 +232,7 @@ void frameVelocityDerivatives( const pinocchio::Model& model, pinocchio::Data& d
 /**
  * @brief How the CBF is imposed along the horizon (see docs/api.md).
  *
- * Both are written for every robot sphere, obstacle sphere and control
+ * Both are written for every robot sphere, obstacle and control
  * interval `i`. `X_0` is the current state and `X_{i+1}` the predicted state
  * at the end of interval `i`.
  */
@@ -295,8 +295,9 @@ struct ThorConfig
 
   /// @name Control barrier function
   /// See cbf.h. Checked only when #cbf is true. The robot is monitored at
-  /// spheres centered at #cbf_frame_ids, the obstacles are spheres centered at
-  /// ThorInput::obstacle_pos; the barrier uses the distance between surfaces.
+  /// spheres centered at #cbf_frame_ids, the obstacles are spheres or capsules
+  /// centered at ThorInput::obstacle_pos (see ThorInput::obstacle_axis); the
+  /// barrier uses the distance between surfaces.
   /// @{
   bool   cbf     = false;  ///< Enables the CBF constraints. Needs a Pinocchio model with `nq == nv == n_joints`.
   CbfFormulation cbf_formulation = CbfFormulation::discrete;  ///< How the CBF is imposed along the horizon.
@@ -307,7 +308,7 @@ struct ThorConfig
   double T_r     = 0.0;    ///< Reaction time before braking [s] (>= 0).
   double C       = 0.0;    ///< Safety margin `C_0` between the robot and obstacle surfaces [m] (> 0).
   double gamma   = 0.0;    ///< Class-K gain of `dh/dt + gamma h >= 0` [1/s].
-  double delta_H = 0.0;    ///< Default distance estimation error [m] (>= 0), used when ThorInput::obstacle_delta_H is empty. The barrier is evaluated at the worst-case distance, i.e. the obstacle sphere is inflated by delta_H; see cbf::perceptionMargin().
+  double delta_H = 0.0;    ///< Default distance estimation error [m] (>= 0), used when ThorInput::obstacle_delta_H is empty. The barrier is evaluated at the worst-case distance, i.e. the obstacle is inflated by delta_H; see cbf::perceptionMargin().
   double cbf_activation_distance = 5.0;  ///< If the lowest barrier over the horizon is above this value [m], the CBF rows are dropped from the QP.
   std::vector<unsigned int> cbf_frame_ids;  ///< Pinocchio frame ids of the centers of the monitored robot spheres.
   std::vector<double> cbf_frame_radii;  ///< Radius of each robot sphere [m] (>= 0), same size as #cbf_frame_ids; empty means points.
@@ -324,9 +325,12 @@ struct ThorConfig
  *   (no obstacle);
  * - otherwise #obstacle_pos and #obstacle_vel must have the same size, at
  *   least ThorConfig::n_obstacle_points;
- * - #obstacle_acc, #obstacle_radius and #obstacle_delta_H may be empty
- *   (defaults: zero acceleration, zero radius, ThorConfig::delta_H) or have
- *   the size of #obstacle_pos.
+ * - #obstacle_acc, #obstacle_radius, #obstacle_axis and #obstacle_delta_H may
+ *   be empty (defaults: zero acceleration, zero radius, spheres,
+ *   ThorConfig::delta_H) or have the size of #obstacle_pos.
+ *
+ * Each obstacle is a sphere, or a capsule (cylinder with hemispherical ends)
+ * if its #obstacle_axis is not zero: see cbf::capsuleBarrierTerms().
  *
  * Only the first ThorConfig::n_obstacle_points points are used. Positions,
  * velocities and accelerations are in the Pinocchio world frame.
@@ -337,11 +341,12 @@ struct ThorInput
   Eigen::VectorXd next_target_q;   ///< Target position at the first prediction time, size `n_joints`.
   double          target_scaling = 1.0;  ///< Desired time scaling (1 = nominal speed).
   Eigen::VectorXd x0;              ///< Current state `[q; dq]`, size `2*n_joints`.
-  std::vector<Eigen::Vector3d> obstacle_pos;  ///< Obstacle sphere centers [m].
+  std::vector<Eigen::Vector3d> obstacle_pos;  ///< Obstacle sphere centers, or capsule axis midpoints [m].
   std::vector<Eigen::Vector3d> obstacle_vel;  ///< Obstacle velocities [m/s].
   std::vector<Eigen::Vector3d> obstacle_acc;  ///< Obstacle accelerations [m/s^2]; empty means zero.
-  std::vector<double> obstacle_radius;        ///< Obstacle sphere radii [m] (>= 0); empty means points.
+  std::vector<double> obstacle_radius;        ///< Obstacle sphere or capsule radii [m] (>= 0); empty means points.
   std::vector<double> obstacle_delta_H;       ///< Distance estimation error of each point [m] (>= 0), added to its radius by the barrier; empty means ThorConfig::delta_H for all.
+  std::vector<Eigen::Vector3d> obstacle_axis; ///< Capsule half axes [m]: the axis goes from `obstacle_pos - obstacle_axis` to `obstacle_pos + obstacle_axis`, fixed in orientation. Zero for a sphere; empty means spheres for all.
 };
 
 /**
@@ -360,7 +365,7 @@ struct CbfDiagnostics
   unsigned int interval       = 0;    ///< Prediction node of #h_min: 0 is the current state, `i` the start of interval `i`, `n_intervals` the end of the horizon (discrete only).
   unsigned int frame_id       = 0;    ///< Pinocchio frame id of the robot sphere.
   double       distance       = 0.0;  ///< Estimated distance between the robot and obstacle surfaces [m], not reduced by delta_H (negative if they overlap).
-  double       v_robot        = 0.0;  ///< Robot velocity along `(p_r - p_o)/|p_r - p_o|` [m/s]; negative when approaching.
+  double       v_robot        = 0.0;  ///< Robot velocity along `(p_r - p_o)/|p_r - p_o|` [m/s], with `p_o` the closest point of a capsule axis; negative when approaching.
   double       v_obstacle     = 0.0;  ///< Obstacle velocity along the same direction [m/s]; positive when approaching.
   unsigned int obstacle_index = 0;    ///< Index of the obstacle point in ThorInput::obstacle_pos.
 };
@@ -557,7 +562,7 @@ class ThorQP
      *
      * Called by solve() with validated inputs; with the CBF enabled the
      * obstacle vectors have at least `n_obstacle_points` elements and
-     * ThorInput::obstacle_acc, obstacle_radius and obstacle_delta_H are filled. Subclasses override this, so that the public solve() and
+     * ThorInput::obstacle_acc, obstacle_radius and obstacle_delta_H are filled; obstacle_axis is empty or has their size. Subclasses override this, so that the public solve() and
      * computedCostrainedSolution() are never hidden.
      * @throws std::runtime_error if the problem is infeasible.
      */

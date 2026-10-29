@@ -14,8 +14,8 @@ the paper and of its reference implementation,
 control intervals, and the CBF can be enabled or disabled with `ThorConfig::cbf`.
 
 The CBF is no longer specific to people. It avoids any dynamic or static
-obstacle, given as spheres with position, velocity and acceleration. The robot
-is covered by spheres as well.
+obstacle, given as spheres or capsules (cylinders with hemispherical ends)
+with position, velocity and acceleration. The robot is covered by spheres.
 
 ### Added
 
@@ -124,6 +124,17 @@ is covered by spheres as well.
   `thor_math::thor_math` share the flags that change the layout of Eigen
   objects. `scripts/build_thor.sh` (in the repository root) builds the
   Pinocchio of `.repos` and `thor_math` with the same flags into one prefix.
+- Capsule obstacles (cylinders with hemispherical ends), e.g. a person from
+  the floor to the head, or a column:
+  - `ThorInput::obstacle_axis`: one half axis per obstacle, from
+    `obstacle_pos` to one end; zero for a sphere, empty means spheres. It is
+    the last field of `ThorInput`, so positional initializers still compile,
+    and leaving it empty does not make `solve()` copy the input;
+  - `cbf::capsuleBarrierTerms()`: beyond the ends the barrier of the sphere
+    at the end, along the side the barrier of the state projected on the
+    plane orthogonal to the axis (exact, since the motion along the axis does
+    not change the distance);
+  - the example models the body of the person as a vertical capsule.
 
 ### Changed
 

@@ -3,8 +3,8 @@
 `thor_math` provides `thor::math::ThorQP`, a model predictive controller (MPC)
 for robot manipulators. It scales the speed of a nominal joint trajectory and,
 optionally, keeps a safe distance from dynamic obstacles through a control
-barrier function (CBF). Obstacles are spheres with position, velocity and
-acceleration: people (e.g. skeleton keypoints), vehicles, other robots and
+barrier function (CBF). Obstacles are spheres or capsules (cylinders with
+hemispherical ends) with position, velocity and acceleration: people (e.g. skeleton keypoints), vehicles, other robots and
 static fixtures are handled the same way.
 
 | Header | Content |
@@ -76,6 +76,7 @@ for (;;) {
   in.obstacle_vel    = {v_o};
   in.obstacle_acc    = {a_o};              // optional
   in.obstacle_radius = {0.2};              // optional: obstacle sphere radius
+  // in.obstacle_axis = {Eigen::Vector3d(0, 0, 0.6)};  // optional: a vertical capsule instead
 
   try {
     const thor::math::ThorOutput out = qp.solve(in);
@@ -175,7 +176,7 @@ For every interval `i`:
 | `-Dqmax <= dq(t_i) <= Dqmax` | always |
 | `qmin <= q(t_i) <= qmax` | `position_bounds` |
 | `K (q(t_i) - qmin) + dq(t_i) >= 0`, `K (qmax - q(t_i)) - dq(t_i) >= 0`, with `K = 0.99 DDqmax / Dqmax` | `position_bounds` |
-| CBF, one row per (interval, robot sphere, obstacle sphere) | `cbf` |
+| CBF, one row per (interval, robot sphere, obstacle) | `cbf` |
 
 The invariance rows limit the velocity towards a position limit, so that the
 robot can always stop before reaching it.
@@ -185,21 +186,30 @@ robot can always stop before reaching it.
 The robot is covered by spheres centered at `cbf_frame_ids`, with radii
 `cbf_frame_radii`. Each obstacle point `k` is a sphere centered at
 `obstacle_pos[k]`, with radius `obstacle_radius[k]` and distance estimation
-error `delta_H_k` (`obstacle_delta_H[k]`, or `ThorConfig::delta_H`). For
-every robot sphere `j` and obstacle sphere `k`:
+error `delta_H_k` (`obstacle_delta_H[k]`, or `ThorConfig::delta_H`). If
+`obstacle_axis[k]` is not zero, the obstacle is a capsule of the same radius
+around the segment from `obstacle_pos[k] - obstacle_axis[k]` to
+`obstacle_pos[k] + obstacle_axis[k]`: a cylinder with hemispherical ends, e.g.
+a person from the floor to the head, or a column. For every robot sphere `j`
+and obstacle `k`:
 
 - **Distance.** The barrier uses the worst-case distance between the
   surfaces, `d = |p_r - p_o| - r_j - r_k - delta_H_k`. The perception error
-  inflates the obstacle sphere.
+  inflates the obstacle. For a capsule `p_o` is the point of the axis
+  closest to `p_r`: beyond an end it is that end (a sphere), along the side
+  the barrier is that of the positions, velocities and accelerations
+  projected on the plane orthogonal to the axis, since the motion along the
+  axis does not change the distance (`cbf::capsuleBarrierTerms()`).
 - **Barrier.** `h = d_min - C`, where `d_min` is the minimum of that distance
   if the robot reacts after `T_r` and then brakes at `a_s`, while the
   obstacle keeps its acceleration (section 5). `C` is the safety margin
   between the surfaces. The safe set is `h >= 0`.
-- **Condition.** One row for every interval `i`, robot sphere and obstacle
-  sphere. `ThorConfig::cbf_formulation` selects how it is written; the two
+- **Condition.** One row for every interval `i`, robot sphere and
+  obstacle. `ThorConfig::cbf_formulation` selects how it is written; the two
   formulations are described below.
 - **Obstacle prediction.** The obstacle centers are extrapolated to each
-  prediction time with constant acceleration.
+  prediction time with constant acceleration; capsule axes translate without
+  rotating.
 - **Activation distance.** If the lowest `h` over the horizon is above
   `cbf_activation_distance`, the CBF rows are dropped from the QP: the
   solution is the same, and the QP is smaller.
@@ -314,7 +324,7 @@ only constrains the rate of `h`.
 
 #### Comparison
 
-On the example scene (5 robot spheres, 3 obstacle spheres, 5 intervals over
+On the example scene (5 robot spheres, 3 obstacles, 5 intervals over
 0.2 s), the executed motion is equally safe with both formulations. The
 difference is in the plan, measured as the nonlinear `h` along the predicted
 states of the new solution over 3000 cycles:
@@ -365,10 +375,10 @@ and the last solution.
 
 **Cost per cycle.** It grows with
 `n_intervals * (n_joints + 1)` variables and with
-`n_intervals * robot spheres * obstacle spheres` CBF rows. There is one
+`n_intervals * robot spheres * obstacles` CBF rows. There is one
 kinematics evaluation per interval (continuous) or per interval plus one
 (discrete), times `cbf_linearizations`. With 6 joints, 5 intervals, 5 robot
-spheres and 3 obstacle spheres, a solve takes about 35–60 µs in Release
+spheres and 3 obstacles, a solve takes about 35–60 µs in Release
 builds with one linearization (see the example and section 3.1).
 
 ### 3.1 Performance
@@ -504,11 +514,11 @@ Settings applied by `ThorQP::configure()`. Vectors have size `n_joints`.
 | `T_r` | 0 | reaction time [s] | >= 0 (CBF) |
 | `C` | 0 | safety margin [m] | > 0 (CBF) |
 | `gamma` | 0 | CBF gain [1/s] | |
-| `delta_H` | 0 | default distance estimation error [m], inflates every obstacle sphere | >= 0 (CBF) |
+| `delta_H` | 0 | default distance estimation error [m], inflates every obstacle | >= 0 (CBF) |
 | `cbf_activation_distance` | 5.0 | drop the CBF rows above this `h` [m] | |
 | `cbf_frame_ids` | empty | Pinocchio frame ids of the robot points | < `model.frames.size()` |
 | `cbf_frame_radii` | empty | radius of each robot sphere [m]; empty means points | empty or size of `cbf_frame_ids`; >= 0 |
-| `n_obstacle_points` | 0 | obstacle spheres per cycle | >= 0 |
+| `n_obstacle_points` | 0 | obstacles (spheres or capsules) per cycle | >= 0 |
 
 ### 4.2 `struct ThorInput`
 
@@ -518,11 +528,12 @@ Settings applied by `ThorQP::configure()`. Vectors have size `n_joints`.
 | `next_target_q` | `n_joints` | target position at `t_0` |
 | `target_scaling` | – | desired time scaling (default 1) |
 | `x0` | `2*n_joints` | current state `[q; dq]` |
-| `obstacle_pos` | ≥ `n_obstacle_points` | obstacle sphere centers [m], world frame |
+| `obstacle_pos` | ≥ `n_obstacle_points` | obstacle sphere centers, or capsule axis midpoints [m], world frame |
 | `obstacle_vel` | same as `obstacle_pos` | velocities [m/s] |
 | `obstacle_acc` | empty or same | accelerations [m/s²]; empty means zero |
-| `obstacle_radius` | empty or same | sphere radii [m] (>= 0); empty means points |
-| `obstacle_delta_H` | empty or same | distance estimation error of each sphere [m] (>= 0); empty means `ThorConfig::delta_H` |
+| `obstacle_radius` | empty or same | sphere or capsule radii [m] (>= 0); empty means points |
+| `obstacle_delta_H` | empty or same | distance estimation error of each obstacle [m] (>= 0); empty means `ThorConfig::delta_H` |
+| `obstacle_axis` | empty or same | capsule half axes [m], from `obstacle_pos` to one end, finite; zero for a sphere, empty means spheres |
 
 With the CBF disabled, the obstacle fields are ignored. With the CBF enabled
 and `obstacle_pos`, `obstacle_vel` and `obstacle_acc` all empty,
@@ -618,8 +629,9 @@ and `updateFramePlacements()`. The linear rows that Pinocchio returns for
 ## 5. Reference: cbf.h
 
 Namespace `thor::math::cbf`. For a robot sphere centered at `p_r` and an
-obstacle sphere centered at `p_o`, `u = (p_r - p_o)/|p_r - p_o|` and `d` is
-the distance between the surfaces. The barrier depends on
+obstacle sphere centered at `p_o` (for a capsule, the closest point of its
+axis), `u = (p_r - p_o)/|p_r - p_o|` and `d` is the distance between the
+surfaces. The barrier depends on
 `psi = [d, v_r, v_o, a_o]`, the distance and the robot velocity, obstacle
 velocity and obstacle acceleration projected on `u`. A negative `v_r` and a
 positive `v_o` mean approaching.
@@ -663,6 +675,23 @@ Returns `h`, `lie_f`, `lie_g`, `h_chi`, `d`, `v_r`, `v_o` and `a_o`.
   acceleration.
 - **`h_chi`.** `h_chi = ∂h/∂d`: it is 1 outside the margin and larger inside.
 - **Coincident centers.** If `|p_r - p_o| <= atol`, `u` is the x axis.
+
+### `BarrierTerms capsuleBarrierTerms(p_r, v_r, p_o, half_axis, v_o, a_o, T_r, a_s, C, radius = 0, atol = 1e-12)`
+
+As `barrierTerms()`, for an obstacle capsule: a cylinder with hemispherical
+ends around the segment from `p_o - half_axis` to `p_o + half_axis`, which
+translates with `v_o` and `a_o` without rotating. `p_o` and `u` refer to the
+point `c` of the axis closest to `p_r`, `d = |p_r - c| - radius`.
+
+- **Beyond an end.** `c` is that end: the result is `barrierTerms()` of the
+  sphere centered there.
+- **Along the side.** `c` slides on the axis: the result is `barrierTerms()`
+  of `p_r`, `v_r`, `p_o`, `v_o` and `a_o` projected on the plane orthogonal
+  to the axis. It is exact, since the motion along the axis does not change
+  the distance; `lie_g` and `grad_p` lie in that plane.
+- **Continuity.** `d` and its gradient are continuous across the regions.
+- **Degenerate cases.** A zero `half_axis` is a sphere (`barrierTerms()`). If
+  `p_r` is on the axis, `u` is a direction orthogonal to it.
 
 ### `double perceptionMargin(beta, sigma_p, sigma_v, sigma_a, T_f_bar)`
 

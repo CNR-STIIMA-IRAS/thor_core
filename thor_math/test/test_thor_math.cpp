@@ -334,7 +334,7 @@ TEST_F(ThorQpIntegrationTest, SingleIntervalCbfUsesCurrentStateAndObstacleAccele
   EXPECT_THROW(qp.solve(in), std::invalid_argument);
 }
 
-// Robot and obstacle spheres: every (frame, obstacle) row uses the sum of the
+// Robot spheres and obstacle spheres or capsules: every (frame, obstacle) row uses the sum of the
 // two radii, inflated by the obstacle's own delta_H (worst-case distance).
 TEST_F(ThorQpIntegrationTest, CbfUsesSphereRadiiAndPerObstacleDeltaH)
 {
@@ -372,6 +372,7 @@ TEST_F(ThorQpIntegrationTest, CbfUsesSphereRadiiAndPerObstacleDeltaH)
   in.obstacle_pos = {Eigen::Vector3d(0.4, 0.6, 0.7), Eigen::Vector3d(0.9, 0.3, 0.9)};
   in.obstacle_vel = {Eigen::Vector3d(0.0, -0.3, 0.0), Eigen::Vector3d::Zero()};
   in.obstacle_radius = {0.10, 0.25};
+  in.obstacle_axis = {Eigen::Vector3d::Zero(), Eigen::Vector3d(0.0, 0.0, 0.6)};  // a sphere and a column
   in.obstacle_delta_H = {0.02, 0.06};
 
   ThorOutput out;
@@ -394,8 +395,8 @@ TEST_F(ThorQpIntegrationTest, CbfUsesSphereRadiiAndPerObstacleDeltaH)
                                              jacobian_dot);
     for (std::size_t k = 0; k < in.obstacle_pos.size(); ++k) {
       SCOPED_TRACE(::testing::Message() << "frame " << j << " obstacle " << k);
-      const cbf::BarrierTerms barrier = cbf::barrierTerms(
-        data.oMf[frame].translation(), jacobian.topRows<3>() * dq, in.obstacle_pos[k],
+      const cbf::BarrierTerms barrier = cbf::capsuleBarrierTerms(
+        data.oMf[frame].translation(), jacobian.topRows<3>() * dq, in.obstacle_pos[k], in.obstacle_axis[k],
         in.obstacle_vel[k], Eigen::Vector3d::Zero(), config.T_r, config.a_s, config.C,
         config.cbf_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k]);
       h_min = std::min(h_min, barrier.h);
@@ -419,6 +420,13 @@ TEST_F(ThorQpIntegrationTest, CbfUsesSphereRadiiAndPerObstacleDeltaH)
   EXPECT_THROW(qp.solve(wrong), std::invalid_argument);
   wrong = in;
   wrong.obstacle_delta_H = {0.1, -0.01};
+  EXPECT_THROW(qp.solve(wrong), std::invalid_argument);
+  // Capsule axes: one per obstacle point, finite.
+  wrong = in;
+  wrong.obstacle_axis = {Eigen::Vector3d::Zero()};
+  EXPECT_THROW(qp.solve(wrong), std::invalid_argument);
+  wrong = in;
+  wrong.obstacle_axis[1].z() = std::numeric_limits<double>::quiet_NaN();
   EXPECT_THROW(qp.solve(wrong), std::invalid_argument);
 
   // Robot sphere radii: one per frame, not negative.

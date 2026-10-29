@@ -127,56 +127,100 @@ namespace cbf
     return h;
   }
 
+  namespace
+  {
+    // barrierTerms() with the direction fallback_u used when the centers coincide.
+    BarrierTerms pointTerms ( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r,
+                              const Eigen::Vector3d& p_o, const Eigen::Vector3d& v_o,
+                              const Eigen::Vector3d& a_o,
+                              double T_r, double a_s, double C, double radius, double atol,
+                              const Eigen::Vector3d& fallback_u )
+    {
+      BarrierTerms out;
+      const Eigen::Vector3d r = p_r - p_o;
+      double center_distance = r.norm();
+      Eigen::Vector3d u;
+      if (center_distance <= atol)
+      {
+        u = fallback_u;
+        center_distance = std::max(center_distance, atol);
+      }
+      else
+      {
+        u = r / center_distance;
+      }
+
+      // The barrier sees the distance between the sphere surfaces; u and its
+      // rotation rate depend on the centers only.
+      out.d   = center_distance - radius;
+      out.v_r = u.dot(v_r);
+      out.v_o = u.dot(v_o);
+      out.a_o = u.dot(a_o);
+
+      Eigen::Vector4d dh_dpsi;
+      out.h = barrier(out.d, out.v_r, out.v_o, out.a_o, T_r, a_s, C, atol, dh_dpsi);
+
+      // Time derivative of psi along the drift: the projections change because
+      // u rotates, with du/dt = (I - u u^T)(v_r - v_o)/|p_r - p_o|.
+      const double d_psi = std::max(center_distance, 1e-3);
+      const Eigen::Vector3d v_diff = v_r - v_o;
+      Eigen::Vector4d psi_f;
+      psi_f(0) = u.dot(v_diff);
+      psi_f(1) = ((v_r - u * out.v_r) / d_psi).dot(v_diff);
+      psi_f(2) = ((v_o - u * out.v_o) / d_psi).dot(v_diff) + out.a_o;
+      psi_f(3) = ((a_o - u * out.a_o) / d_psi).dot(v_diff);
+
+      out.lie_f = dh_dpsi.dot(psi_f);
+      // Only v_r depends on the robot point acceleration: d(v_r)/d(acc) = u.
+      out.lie_g = dh_dpsi(1) * u;
+      out.h_chi = dh_dpsi(0);
+      // Gradient with respect to the robot center position, obstacle fixed:
+      // d(d)/dp_r = u, d(u.w)/dp_r = (I - u u^T) w / |p_r - p_o|.
+      out.grad_p = dh_dpsi(0) * u
+                 + dh_dpsi(1) * (v_r - u * out.v_r) / d_psi
+                 + dh_dpsi(2) * (v_o - u * out.v_o) / d_psi
+                 + dh_dpsi(3) * (a_o - u * out.a_o) / d_psi;
+      return out;
+    }
+  }  // namespace
+
   BarrierTerms barrierTerms ( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r,
                               const Eigen::Vector3d& p_o, const Eigen::Vector3d& v_o,
                               const Eigen::Vector3d& a_o,
                               double T_r, double a_s, double C, double radius, double atol )
   {
-    BarrierTerms out;
-    const Eigen::Vector3d r = p_r - p_o;
-    double center_distance = r.norm();
-    Eigen::Vector3d u;
-    if (center_distance <= atol)
-    {
-      u = Eigen::Vector3d::UnitX();
-      center_distance = std::max(center_distance, atol);
-    }
-    else
-    {
-      u = r / center_distance;
-    }
+    return pointTerms(p_r, v_r, p_o, v_o, a_o, T_r, a_s, C, radius, atol, Eigen::Vector3d::UnitX());
+  }
 
-    // The barrier sees the distance between the sphere surfaces; u and its
-    // rotation rate depend on the centers only.
-    out.d   = center_distance - radius;
-    out.v_r = u.dot(v_r);
-    out.v_o = u.dot(v_o);
-    out.a_o = u.dot(a_o);
+  BarrierTerms capsuleBarrierTerms ( const Eigen::Vector3d& p_r, const Eigen::Vector3d& v_r,
+                                     const Eigen::Vector3d& p_o, const Eigen::Vector3d& half_axis,
+                                     const Eigen::Vector3d& v_o, const Eigen::Vector3d& a_o,
+                                     double T_r, double a_s, double C, double radius, double atol )
+  {
+    const double half_length = half_axis.norm();
+    if (half_length <= atol)
+      return barrierTerms(p_r, v_r, p_o, v_o, a_o, T_r, a_s, C, radius, atol);
+    const Eigen::Vector3d axis = half_axis / half_length;
 
-    Eigen::Vector4d dh_dpsi;
-    out.h = barrier(out.d, out.v_r, out.v_o, out.a_o, T_r, a_s, C, atol, dh_dpsi);
+    // Beyond the ends the closest point of the segment is an end, which moves
+    // with the obstacle: a sphere.
+    const double s = axis.dot(p_r - p_o);
+    if (s >= half_length)
+      return barrierTerms(p_r, v_r, p_o + half_axis, v_o, a_o, T_r, a_s, C, radius, atol);
+    if (s <= -half_length)
+      return barrierTerms(p_r, v_r, p_o - half_axis, v_o, a_o, T_r, a_s, C, radius, atol);
 
-    // Time derivative of psi along the drift: the projections change because
-    // u rotates, with du/dt = (I - u u^T)(v_r - v_o)/|p_r - p_o|.
-    const double d_psi = std::max(center_distance, 1e-3);
-    const Eigen::Vector3d v_diff = v_r - v_o;
-    Eigen::Vector4d psi_f;
-    psi_f(0) = u.dot(v_diff);
-    psi_f(1) = ((v_r - u * out.v_r) / d_psi).dot(v_diff);
-    psi_f(2) = ((v_o - u * out.v_o) / d_psi).dot(v_diff) + out.a_o;
-    psi_f(3) = ((a_o - u * out.a_o) / d_psi).dot(v_diff);
-
-    out.lie_f = dh_dpsi.dot(psi_f);
-    // Only v_r depends on the robot point acceleration: d(v_r)/d(acc) = u.
-    out.lie_g = dh_dpsi(1) * u;
-    out.h_chi = dh_dpsi(0);
-    // Gradient with respect to the robot center position, obstacle fixed:
-    // d(d)/dp_r = u, d(u.w)/dp_r = (I - u u^T) w / |p_r - p_o|.
-    out.grad_p = dh_dpsi(0) * u
-               + dh_dpsi(1) * (v_r - u * out.v_r) / d_psi
-               + dh_dpsi(2) * (v_o - u * out.v_o) / d_psi
-               + dh_dpsi(3) * (a_o - u * out.a_o) / d_psi;
-    return out;
+    // Along the side the closest point slides on the axis and the motion along
+    // it does not change the distance: the pair is a pair of points in the
+    // plane orthogonal to the axis. The axis is fixed, so the projections of
+    // the derivatives are the derivatives of the projections, and the
+    // gradients, which lie in the plane, are also those of the 3D state.
+    const Eigen::Matrix3d P = Eigen::Matrix3d::Identity() - axis * axis.transpose();
+    // If the robot center is on the axis, any direction in the plane will do.
+    Eigen::Index least_aligned;
+    axis.cwiseAbs().minCoeff(&least_aligned);
+    const Eigen::Vector3d fallback_u = (P * Eigen::Vector3d::Unit(least_aligned)).normalized();
+    return pointTerms(P * p_r, P * v_r, P * p_o, P * v_o, P * a_o, T_r, a_s, C, radius, atol, fallback_u);
   }
 
   double perceptionMargin ( double beta, double sigma_p, double sigma_v, double sigma_a, double T_f_bar )

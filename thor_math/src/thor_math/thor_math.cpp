@@ -933,13 +933,16 @@ namespace math
 
         for (std::size_t k = 0; k < static_cast<std::size_t>(m_n_obstacle_points); ++k)
         {
-          // Obstacle point extrapolated with constant acceleration, as in d_min.
+          // Obstacle extrapolated with constant acceleration, as in d_min.
           const Eigen::Vector3d& a_o = in.obstacle_acc[k];
           const Eigen::Vector3d p_o = in.obstacle_pos[k] + in.obstacle_vel[k] * t_start + 0.5 * a_o * t_start * t_start;
           const Eigen::Vector3d v_o = in.obstacle_vel[k] + a_o * t_start;
           const double radius = m_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k];
 
-          const cbf::BarrierTerms b = cbf::barrierTerms(p_r, v_r, p_o, v_o, a_o, m_T_r, m_a_s, m_C, radius);
+          // Empty axes: spheres (see ThorInput::obstacle_axis).
+          const Eigen::Vector3d axis = in.obstacle_axis.empty() ? Eigen::Vector3d::Zero() : in.obstacle_axis[k];
+          const cbf::BarrierTerms b = cbf::capsuleBarrierTerms(p_r, v_r, p_o, axis, v_o, a_o,
+                                                               m_T_r, m_a_s, m_C, radius);
 
           if (i == 0)
             h_now = std::min(h_now, b.h);
@@ -1020,13 +1023,16 @@ namespace math
 
         for (std::size_t k = 0; k < n_obstacles; ++k)
         {
-          // Obstacle point extrapolated with constant acceleration, as in d_min.
+          // Obstacle extrapolated with constant acceleration, as in d_min.
           const Eigen::Vector3d& a_o = in.obstacle_acc[k];
           const Eigen::Vector3d p_o = in.obstacle_pos[k] + in.obstacle_vel[k] * t + 0.5 * a_o * t * t;
           const Eigen::Vector3d v_o = in.obstacle_vel[k] + a_o * t;
           const double radius = m_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k];
 
-          const cbf::BarrierTerms b = cbf::barrierTerms(p_r, v_r, p_o, v_o, a_o, m_T_r, m_a_s, m_C, radius);
+          // Empty axes: spheres (see ThorInput::obstacle_axis).
+          const Eigen::Vector3d axis = in.obstacle_axis.empty() ? Eigen::Vector3d::Zero() : in.obstacle_axis[k];
+          const cbf::BarrierTerms b = cbf::capsuleBarrierTerms(p_r, v_r, p_o, axis, v_o, a_o,
+                                                               m_T_r, m_a_s, m_C, radius);
 
           if (m == 0)
             h_now = std::min(h_now, b.h);
@@ -1240,16 +1246,20 @@ namespace math
     const std::size_t n_obstacles = full.obstacle_pos.size();
     if (full.obstacle_vel.size() != n_obstacles || full.obstacle_acc.size() != n_obstacles ||
         full.obstacle_radius.size() != n_obstacles || full.obstacle_delta_H.size() != n_obstacles ||
+        (!full.obstacle_axis.empty() && full.obstacle_axis.size() != n_obstacles) ||
         n_obstacles < static_cast<std::size_t>(m_n_obstacle_points))
     {
-      throw std::invalid_argument("obstacle_pos, obstacle_vel and, if given, obstacle_acc, obstacle_radius and "
-                                  "obstacle_delta_H must have the same size, at least n_obstacle_points (" +
+      throw std::invalid_argument("obstacle_pos, obstacle_vel and, if given, obstacle_acc, obstacle_radius, "
+                                  "obstacle_axis and obstacle_delta_H must have the same size, at least "
+                                  "n_obstacle_points (" +
                                   std::to_string(m_n_obstacle_points) + ")");
     }
     for (std::size_t k = 0; k < n_obstacles; ++k)
     {
       if (!(full.obstacle_radius[k] >= 0.0) || !(full.obstacle_delta_H[k] >= 0.0))
         throw std::invalid_argument("obstacle_radius and obstacle_delta_H must not be negative");
+      if (!full.obstacle_axis.empty() && !full.obstacle_axis[k].allFinite())
+        throw std::invalid_argument("obstacle_axis must be finite");
     }
     doSolve(full, out);
     return out;
@@ -1270,7 +1280,7 @@ namespace math
                                                            const std::vector<Eigen::Vector3d> &v_o_vector,
                                                            const std::vector<Eigen::Vector3d> &p_o_vector )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_o_vector, v_o_vector, {}, {}, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_o_vector, v_o_vector, {}, {}, {}, {}});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);
@@ -1283,7 +1293,7 @@ namespace math
                                                            Eigen::VectorXd& next_acc,
                                                            double& next_scaling )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}, {}, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}, {}, {}, {}});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);
