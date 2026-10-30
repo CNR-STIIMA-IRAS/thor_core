@@ -74,6 +74,13 @@ thor_chainable:
         safety_margin: 0.05
         gamma: 5.0
         distance_error: 0.02
+        # Perception uncertainty (thor_math/docs/robust_cbf_method.md): standard
+        # deviations of obstacle position [m], velocity [m/s], acceleration [m/s^2].
+        # Zero keeps only distance_error; do not count the same noise twice.
+        obstacle_sigma: [0.0, 0.0, 0.0]
+        sigma_bound: 3.0
+        robust_rate: false
+        escape_margin: 0.0   # 0: safety_margin
         max_obstacles: 4
       obstacles:
         topic: /thor_controller/obstacles

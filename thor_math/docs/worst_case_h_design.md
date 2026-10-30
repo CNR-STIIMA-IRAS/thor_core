@@ -14,6 +14,10 @@ componenti di `ψ`: la barriera, `L_f h`, `L_g h` e i gradienti si valutano
 nell'angolo peggiore `ψ_worst` della scatola di `±kσ` attorno allo stato
 misurato. Il margine dipende così dallo stato, e `C` può scendere verso `C₀`.
 
+Il metodo completo, con dimostrazioni e figure, è in
+[robust_cbf_method.md](robust_cbf_method.md); questa nota resta come storia
+delle scelte di design.
+
 Riferimenti: [robust_margin_deadlock.md](robust_margin_deadlock.md),
 [api.md](api.md), e le eq. (6)–(16) e (28) dell'articolo.
 
@@ -393,6 +397,7 @@ precedente dell'articolo: ora cita l'eq. (28).
 - [ ] Script di calibrazione di `C_modello` sul dataset umano registrato
       (§11.3): in attesa del dataset.
 - [ ] Valori di `C₀` e `Δ_H` usati negli esperimenti (§11.4).
-- [ ] Esporre `obstacle_sigma`, `sigma_bound`, `C_escape` e `cbf_robust_rate`
-      come parametri ROS in `thor_controllers`.
+- [x] Esporre `obstacle_sigma`, `sigma_bound`, `C_escape` e `cbf_robust_rate`
+      come parametri ROS in `thor_controllers` (`thor.cbf.*` e campi `sigma_*`
+      di `thor_msgs/Obstacle`).
 - [ ] Coprire gli errori che cambiano nel tempo (§8, *Cosa non copre*).

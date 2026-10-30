@@ -215,7 +215,8 @@ and obstacle `k`:
   `psi = [d, v_r, v_o, a_o]`, so the barrier, its Lie derivatives and its
   gradients are evaluated at the worst corner of the box
   (`cbf::barrierTerms()`; design and limits in
-  [worst_case_h_design.md](worst_case_h_design.md)). With only `sigma_p` and
+  [worst_case_h_design.md](worst_case_h_design.md); the full method, with
+  proofs, is in [robust_cbf_method.md](robust_cbf_method.md)). With only `sigma_p` and
   a radial motion this is the same as `delta_H = sigma_bound sigma_p`; do not
   count the same noise in both.
 - **Condition.** One row for every interval `i`, robot sphere and

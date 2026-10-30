@@ -20,6 +20,14 @@ project uses [Semantic Versioning](https://semver.org/).
   trajectory controller, with position, velocity and acceleration reference
   interfaces and a `speed_scaling` state interface for
   `joint_trajectory_controller`.
+- Perception uncertainty of the obstacles (see
+  `thor_math/docs/robust_cbf_method.md`): parameters
+  `thor.cbf.obstacle_sigma`, `thor.cbf.sigma_bound` and `thor.cbf.robust_rate`,
+  and the fields `sigma_position`, `sigma_velocity` and `sigma_acceleration`
+  of `thor_msgs/Obstacle` (negative: the default of the controller, component
+  by component). `Obstacle::sigma` in `ThorCore`.
+- `thor.cbf.escape_margin`: scale of the escape term of the barrier
+  (`ThorConfig::C_escape`); 0 means `thor.cbf.safety_margin`.
 - Parameters under `thor.*`, generated with `generate_parameter_library`, and
   the `ThorControllerState` message on `thor.state_topic`, with the actual
   distance from the closest obstacle.

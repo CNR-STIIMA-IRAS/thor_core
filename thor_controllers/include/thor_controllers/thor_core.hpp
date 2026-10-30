@@ -50,6 +50,10 @@ struct Obstacle
   Eigen::Vector3d half_axis = Eigen::Vector3d::Zero();
   double radius = 0.0;
   double delta_h = -1.0;  ///< Negative: ThorConfig::delta_H.
+  /// Standard deviations of the position [m], velocity [m/s] and
+  /// acceleration [m/s^2]; a negative component means that component of
+  /// ThorConfig::obstacle_sigma.
+  Eigen::Vector3d sigma = Eigen::Vector3d::Constant(-1.0);
 };
 
 /// Settings of ThorCore. The joint-related fields of #mpc (n_joints, limits)

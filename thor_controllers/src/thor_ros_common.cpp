@@ -51,6 +51,10 @@ CoreSettings makeCoreSettings(
   c.C = p.cbf.safety_margin;
   c.gamma = p.cbf.gamma;
   c.delta_H = p.cbf.distance_error;
+  c.C_escape = p.cbf.escape_margin;
+  c.obstacle_sigma = Eigen::Vector3d(p.cbf.obstacle_sigma[0], p.cbf.obstacle_sigma[1], p.cbf.obstacle_sigma[2]);
+  c.sigma_bound = p.cbf.sigma_bound;
+  c.cbf_robust_rate = p.cbf.robust_rate;
   c.cbf_activation_distance = p.cbf.activation_distance;
 
   for (const auto & name : p.robot_spheres.names)
@@ -87,6 +91,7 @@ void fromMsg(const thor_msgs::msg::ObstacleArray & msg, std::vector<Obstacle> & 
     o.half_axis = toEigen(m.half_axis);
     o.radius = m.radius;
     o.delta_h = m.delta_h;
+    o.sigma = Eigen::Vector3d(m.sigma_position, m.sigma_velocity, m.sigma_acceleration);
   }
 }
 

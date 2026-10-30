@@ -296,6 +296,44 @@ TEST(ThorCore, UsesTheClosestObstacles)
   EXPECT_LT(out.cbf.distance, 0.6);
 }
 
+// The standard deviations of an obstacle come from the obstacle itself or,
+// component by component when negative, from ThorConfig::obstacle_sigma. With
+// the robot at rest and a static obstacle only the position one acts: the
+// barrier is that of an obstacle sigma_bound * sigma_position closer.
+TEST(ThorCore, PerceptionSigmaPerObstacleOrDefault)
+{
+  constexpr double sigma_p = 0.02;
+  auto h_now = [](const Eigen::Vector3d & default_sigma, const Eigen::Vector3d & obstacle_sigma) {
+    auto s = defaultSettings();
+    s.max_obstacles = 1;
+    s.mpc.obstacle_sigma = default_sigma;
+    ThorCore core;
+    core.configure(readUrdf(), s);
+    core.reset(kHome, Eigen::VectorXd());
+    Obstacle o;
+    o.position = core.sphereCenters().back() + Eigen::Vector3d(0.0, 0.6, 0.0);
+    o.sigma = obstacle_sigma;
+    core.setObstacles({o});
+    const CoreOutput & out = core.step(constantVelocityInput(core, kHome, 0.0, 0.0));
+    EXPECT_EQ(out.status, CoreOutput::Status::ok);
+    return std::make_pair(out.cbf.h_now, out.cbf.distance);
+  };
+  const Eigen::Vector3d none = Eigen::Vector3d::Zero();
+  const Eigen::Vector3d position(sigma_p, 0.0, 0.0);
+  const Eigen::Vector3d use_default = Eigen::Vector3d::Constant(-1.0);
+
+  const auto exact = h_now(none, use_default);
+  const auto own = h_now(none, position);
+  const auto from_default = h_now(position, use_default);
+  const auto overridden = h_now(position, Eigen::Vector3d(0.0, -1.0, -1.0));
+
+  EXPECT_NEAR(own.first, exact.first - 3.0 * sigma_p, 1e-9);  // sigma_bound = 3
+  EXPECT_NEAR(from_default.first, own.first, 1e-12);
+  EXPECT_NEAR(overridden.first, exact.first, 1e-12);
+  // The diagnostics report the measured distance.
+  EXPECT_NEAR(own.second, exact.second, 1e-12);
+}
+
 TEST(ThorCore, BrakesWhenThereIsNoSolution)
 {
   ThorCore core;

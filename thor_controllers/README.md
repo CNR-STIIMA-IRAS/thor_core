@@ -93,6 +93,8 @@ The full list, with defaults and validation, is in
 | `thor.limits.acceleration` | One value per joint (required). |
 | `thor.limits.velocity` | One value per joint; empty means the URDF limits. Position limits come from the URDF. |
 | `thor.cbf.*` | Barrier: `braking_deceleration`, `reaction_time`, `safety_margin`, `gamma`, `distance_error`, `max_obstacles`, ... |
+| `thor.cbf.{obstacle_sigma,sigma_bound,robust_rate}` | Perception uncertainty: default standard deviations of the obstacle position, velocity and acceleration, the number of standard deviations of the box (default 3), and the robust rate term of the continuous formulation. See below. |
+| `thor.cbf.escape_margin` | Scale of the escape term of the barrier; 0 means `safety_margin`. |
 | `thor.robot_spheres.names` and `thor.robot_spheres.<name>.{frame,offset,radius}` | Spheres covering the robot, attached to frames of the URDF. |
 | `thor.obstacles.{topic,frame_id,timeout}` | Obstacle input. |
 | `thor.state_topic` | State output (default `~/thor_state`). |
@@ -107,7 +109,9 @@ limits are supported.
   `thor_msgs/ObstacleArray`, in the root frame of the URDF (or
   `thor.obstacles.frame_id`); messages in other frames are discarded. Each
   obstacle has position, velocity, acceleration, radius, a capsule half axis
-  (zero for a sphere) and its own distance error. When more than
+  (zero for a sphere), its own distance error and its own standard
+  deviations (`sigma_position`, `sigma_velocity`, `sigma_acceleration`;
+  negative means `thor.cbf.obstacle_sigma`). When more than
   `thor.cbf.max_obstacles` are given, the closest to the robot are used.
   Without new messages for `thor.obstacles.timeout`, the last obstacles are
   kept but considered still.
@@ -126,7 +130,18 @@ limits are supported.
   `h` recover gradually instead of declaring the problem infeasible. A few
   millimeters below zero also come from the linearization along the horizon.
 - The obstacle input is not filtered: perception must give positions and
-  velocities in the right frame, with `delta_h` covering its errors.
+  velocities in the right frame, with `delta_h` or the standard deviations
+  covering its errors.
+- **Perception uncertainty.** With `thor.cbf.obstacle_sigma` (or the
+  per-obstacle `sigma_*`), the barrier is evaluated at the worst obstacle
+  state within `sigma_bound` standard deviations: closer, faster towards the
+  robot, accelerating towards it. The box grows along the horizon. Use either
+  `distance_error` or `sigma_position` for the same position noise, not both.
+  With a smaller `safety_margin`, raise `escape_margin` so that the escape
+  term keeps its slope positive at the usual speeds
+  (`v < escape_margin / reaction_time`). The method is described in
+  [thor_math/docs/worst_case_h_design.md](../thor_math/docs/worst_case_h_design.md)
+  and [thor_math/docs/robust_cbf_method.md](../thor_math/docs/robust_cbf_method.md).
 
 ## Tests
 

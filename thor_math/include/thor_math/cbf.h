@@ -30,9 +30,33 @@
  * The robot point acceleration is the control input. ThorQP maps it to the
  * joint accelerations with the frame Jacobian: `a_r = J ddq + dJ dq`.
  *
- * The obstacle state can be uncertain (PerceptionBounds). The barrier is then
- * evaluated at the worst corner of the box around the measured `psi`, see
- * barrierTerms() and docs/worst_case_h_design.md.
+ * @section cbf_robust Perception uncertainty
+ *
+ * The obstacle state can be uncertain (PerceptionBounds). The method, with
+ * proofs and figures, is in docs/robust_cbf_method.md; in short:
+ *
+ * - **Assumptions.** (A1) the true obstacle position, velocity and
+ *   acceleration are within the Euclidean bounds `b_p`, `b_v`, `b_a` of the
+ *   measured ones; (A2) the robot state is exact; (A3) the errors are constant
+ *   over a control period; (A4) the obstacle keeps a constant acceleration
+ *   (its model error is not a measurement error and belongs to `C`).
+ * - **Bounds on psi** (first order in `b_p / |p_r - p_o|`): the position error
+ *   moves the distance and rotates `u`, so every projection is uncertain,
+ *   see BarrierTerms::psi_bound.
+ * - **Monotonicity.** `d_min` is non-decreasing in `d` and `v_r` and
+ *   non-increasing in `v_o` and `a_o` (envelope theorem, plus the window
+ *   `T_f` shrinking as `v_r` grows). Its minimum over the box is therefore the
+ *   fixed corner `(d - b_d, v_r - b_v_r, v_o + b_v_o, a_o + b_a_o)`, which is
+ *   also the minimum of `h` when `v_r <= C_e / T_r` in the box.
+ * - **Robust barrier.** `h`, its Lie derivatives and its gradients are
+ *   evaluated at the corner, so `h(corner) >= 0` implies `h >= 0` for every
+ *   compatible true state. Unlike the first-order form
+ *   `gamma (h - sum |dh/dpsi_i| b_i)`, it is exact under the assumptions and
+ *   keeps the escape term active on the robust boundary (no deadlock).
+ * - **Rate.** Along the true motion the rate of the robust barrier is
+ *   `dh/dpsi(corner) . dpsi/dt(true)`; its distance from the Lie derivatives
+ *   at the corner is bounded by BarrierTerms::rate_bound [m/s], to be
+ *   subtracted without `gamma`.
  */
 
 #ifndef THOR_MATH__THOR_MATH__CBF__H

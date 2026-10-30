@@ -167,10 +167,37 @@ thor_controllers:
       distance_error:
         type: double
         default_value: 0.0
-        description: "Default distance estimation error [m] (delta_H), for obstacles that do not give their own."
+        description: "Default distance estimation error [m] (delta_H), for obstacles that do not give their own. Inflates the obstacle; do not count the same noise here and in obstacle_sigma."
         read_only: true
         validation:
           gt_eq<>: [0.0]
+      escape_margin:
+        type: double
+        default_value: 0.0
+        description: "Scale of the escape term of the barrier [m] (C_escape); 0 means safety_margin. The term starts at d_min = safety_margin with slope reaction_time * v_r / escape_margin, so the barrier keeps increasing with d_min up to a robot speed of escape_margin / reaction_time."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      obstacle_sigma:
+        type: double_array
+        default_value: [0.0, 0.0, 0.0]
+        description: "Default standard deviations of the obstacle position [m], velocity [m/s] and acceleration [m/s^2], for obstacles that do not give their own. The barrier is evaluated at the worst corner of the box of sigma_bound standard deviations (thor_math/docs/worst_case_h_design.md)."
+        read_only: true
+        validation:
+          fixed_size<>: [3]
+          lower_element_bounds<>: [0.0]
+      sigma_bound:
+        type: double
+        default_value: 3.0
+        description: "Number of standard deviations of the perception box (k)."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      robust_rate:
+        type: bool
+        default_value: false
+        description: "Continuous formulation only: also subtract the bound of the error of dh/dt caused by obstacle_sigma."
+        read_only: true
       activation_distance:
         type: double
         default_value: 5.0

@@ -16,3 +16,10 @@ geometry_msgs/Vector3 half_axis
 # Distance estimation error [m] (>= 0), added to the radius by the barrier.
 # Negative means the default of the controller (thor.cbf.distance_error).
 float64 delta_h -1.0
+# Standard deviations of the estimated position [m], velocity [m/s] and
+# acceleration [m/s^2] (>= 0). The barrier is evaluated at the worst obstacle
+# state within thor.cbf.sigma_bound standard deviations. Negative means the
+# default of the controller (thor.cbf.obstacle_sigma), component by component.
+float64 sigma_position -1.0
+float64 sigma_velocity -1.0
+float64 sigma_acceleration -1.0

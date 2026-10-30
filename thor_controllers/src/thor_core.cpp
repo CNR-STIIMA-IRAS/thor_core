@@ -221,6 +221,7 @@ void ThorCore::configure(const std::string & urdf, const CoreSettings & settings
   impl->in.obstacle_axis.assign(m, Eigen::Vector3d::Zero());
   impl->in.obstacle_radius.assign(m, 0.0);
   impl->in.obstacle_delta_H.assign(m, config.delta_H);
+  impl->in.obstacle_sigma.assign(m, config.obstacle_sigma);
   impl->obstacles.reserve(std::max<std::size_t>(m, 16));
   impl->obstacle_distance.reserve(impl->obstacles.capacity());
   impl->obstacle_order.reserve(impl->obstacles.capacity());
@@ -292,6 +293,8 @@ void ThorCore::Impl::selectObstacles()
       in.obstacle_axis[k] = o.half_axis;
       in.obstacle_radius[k] = std::max(0.0, o.radius);
       in.obstacle_delta_H[k] = o.delta_h >= 0.0 ? o.delta_h : config.delta_H;
+      for (Eigen::Index i = 0; i < 3; ++i)
+        in.obstacle_sigma[k](i) = o.sigma(i) >= 0.0 ? o.sigma(i) : config.obstacle_sigma(i);
     }
     else
     {
@@ -301,6 +304,7 @@ void ThorCore::Impl::selectObstacles()
       in.obstacle_axis[k].setZero();
       in.obstacle_radius[k] = 0.0;
       in.obstacle_delta_H[k] = config.delta_H;
+      in.obstacle_sigma[k] = config.obstacle_sigma;
     }
   }
   out.n_obstacles = static_cast<unsigned int>(used);
