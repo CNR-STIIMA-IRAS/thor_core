@@ -184,6 +184,18 @@ namespace math
 
   namespace
   {
+    // Tolerance of the CBF kernels (the default of cbf::barrierTerms()).
+    constexpr double kAtol = 1e-12;
+
+    // Perception box of an obstacle extrapolated with constant acceleration
+    // for a time t: the worst-case errors add up along the extrapolation.
+    cbf::PerceptionBounds perceptionBounds ( const Eigen::Vector3d& sigma, double k, double t )
+    {
+      return {k * (sigma(0) + sigma(1) * t + 0.5 * sigma(2) * t * t),
+              k * (sigma(1) + sigma(2) * t),
+              k * sigma(2)};
+    }
+
     // frameVelocityDerivatives() with caller-provided 6 x nv buffers, so that
     // ThorQP does not allocate at every cycle.
     void frameVelocityDerivatives ( const pinocchio::Model& model, pinocchio::Data& data,
@@ -898,7 +910,12 @@ namespace math
     // m/s; its first-order correction - h_chi delta_H would move the safe-set
     // boundary away from where the escape term of the barrier acts, and a robot
     // stopped on it could never move again (docs/robust_margin_deadlock.md).
-    // With a single interval and delta_H = 0 this is the one-step controller of cbf_python.
+    // With perception bounds (ThorInput::obstacle_sigma), h and its Lie
+    // derivatives are at the worst corner of the box around the measured psi
+    // (cbf::barrierTerms()); with m_cbf_robust_rate the bound of the error of
+    // dh/dt, cbf::BarrierTerms::rate_bound, is also subtracted
+    // (docs/worst_case_h_design.md).
+    // With a single interval, delta_H = 0 and no bounds this is the one-step controller of cbf_python.
     const Eigen::VectorXd& x0 = in.x0;
     const Eigen::Index n_cols = m_CI.cols();
 
@@ -938,11 +955,12 @@ namespace math
           const Eigen::Vector3d p_o = in.obstacle_pos[k] + in.obstacle_vel[k] * t_start + 0.5 * a_o * t_start * t_start;
           const Eigen::Vector3d v_o = in.obstacle_vel[k] + a_o * t_start;
           const double radius = m_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k];
+          const cbf::PerceptionBounds bounds = perceptionBounds(in.obstacle_sigma[k], m_sigma_bound, t_start);
 
           // Empty axes: spheres (see ThorInput::obstacle_axis).
           const Eigen::Vector3d axis = in.obstacle_axis.empty() ? Eigen::Vector3d::Zero() : in.obstacle_axis[k];
           const cbf::BarrierTerms b = cbf::capsuleBarrierTerms(p_r, v_r, p_o, axis, v_o, a_o,
-                                                               m_T_r, m_a_s, m_C, radius);
+                                                               m_T_r, m_a_s, m_C, radius, kAtol, bounds, m_C_escape);
 
           if (i == 0)
             h_now = std::min(h_now, b.h);
@@ -952,9 +970,9 @@ namespace math
             diag.h_min = b.h;
             diag.interval = i;
             diag.frame_id = frameId;
-            diag.distance = b.d + in.obstacle_delta_H[k];
-            diag.v_robot = b.v_r;
-            diag.v_obstacle = b.v_o;
+            diag.distance = b.d + b.psi_bound(0) + in.obstacle_delta_H[k];
+            diag.v_robot = b.v_r + b.psi_bound(1);
+            diag.v_obstacle = b.v_o - b.psi_bound(2);
             diag.obstacle_index = static_cast<unsigned int>(k);
           }
 
@@ -962,6 +980,8 @@ namespace math
           const Eigen::Index col = n_cols - m_n_obstacle_points * m_nc * (j+1) + m_n_obstacle_points * i + k;
           m_CI.col(col).segment(m_nax * i, m_nax).noalias() = J.topRows<3>().transpose() * b.lie_g;
           ci0(col) = b.lie_g.dot(dJdq) + b.lie_f + m_gamma * b.h;
+          if (m_cbf_robust_rate)
+            ci0(col) -= b.rate_bound;
         }
       }
     }
@@ -974,8 +994,8 @@ namespace math
     // predicted state at the end of interval m-1 (affine in the inputs u).
     // For every interval i, robot sphere and obstacle sphere:
     //   h(X_{i+1}) >= alpha_i h(X_i),   alpha_i = max(0, 1 - gamma dt_i)
-    // h is evaluated at the worst-case distance (radii + delta_H, see
-    // buildContinuousCbf()) and linearized around the trajectory obtained by
+    // h is evaluated at the worst-case distance (radii + delta_H) and at the
+    // worst corner of the perception box (see buildContinuousCbf()), and linearized around the trajectory obtained by
     // applying the reference inputs u_ref (see doSolve()) from the current state:
     //   h(X_m(u)) ~ c_m + G_m u,   G_m = dh/dq dq_m/du + dh/ddq ddq_m/du
     // with dh/dq = grad_p^T J + lie_g^T dv/dq and dh/ddq = lie_g^T J.
@@ -1028,11 +1048,12 @@ namespace math
           const Eigen::Vector3d p_o = in.obstacle_pos[k] + in.obstacle_vel[k] * t + 0.5 * a_o * t * t;
           const Eigen::Vector3d v_o = in.obstacle_vel[k] + a_o * t;
           const double radius = m_frame_radii[j] + in.obstacle_radius[k] + in.obstacle_delta_H[k];
+          const cbf::PerceptionBounds bounds = perceptionBounds(in.obstacle_sigma[k], m_sigma_bound, t);
 
           // Empty axes: spheres (see ThorInput::obstacle_axis).
           const Eigen::Vector3d axis = in.obstacle_axis.empty() ? Eigen::Vector3d::Zero() : in.obstacle_axis[k];
           const cbf::BarrierTerms b = cbf::capsuleBarrierTerms(p_r, v_r, p_o, axis, v_o, a_o,
-                                                               m_T_r, m_a_s, m_C, radius);
+                                                               m_T_r, m_a_s, m_C, radius, kAtol, bounds, m_C_escape);
 
           if (m == 0)
             h_now = std::min(h_now, b.h);
@@ -1042,9 +1063,9 @@ namespace math
             diag.h_min = b.h;
             diag.interval = m;
             diag.frame_id = frameId;
-            diag.distance = b.d + in.obstacle_delta_H[k];
-            diag.v_robot = b.v_r;
-            diag.v_obstacle = b.v_o;
+            diag.distance = b.d + b.psi_bound(0) + in.obstacle_delta_H[k];
+            diag.v_robot = b.v_r + b.psi_bound(1);
+            diag.v_obstacle = b.v_o - b.psi_bound(2);
             diag.obstacle_index = static_cast<unsigned int>(k);
           }
 
@@ -1144,6 +1165,8 @@ namespace math
         throw std::invalid_argument("a_s and C must be positive");
       if (!(config.T_r >= 0.0) || !(config.delta_H >= 0.0))
         throw std::invalid_argument("T_r and delta_H must not be negative");
+      if (!(config.C_escape >= 0.0) || !(config.sigma_bound >= 0.0) || !(config.obstacle_sigma.array() >= 0.0).all())
+        throw std::invalid_argument("C_escape, sigma_bound and obstacle_sigma must not be negative");
       if (config.cbf_linearizations < 1)
         throw std::invalid_argument("cbf_linearizations must be at least 1");
       if (!(config.cbf_linearization_damping > 0.0 && config.cbf_linearization_damping <= 1.0))
@@ -1190,6 +1213,10 @@ namespace math
     m_C = config.C;
     m_gamma = config.gamma;
     m_delta_H = config.delta_H;
+    m_C_escape = config.C_escape;
+    m_obstacle_sigma = config.obstacle_sigma;
+    m_sigma_bound = config.sigma_bound;
+    m_cbf_robust_rate = config.cbf_robust_rate;
     m_cbf_formulation = config.cbf_formulation;
     m_cbf_linearizations = config.cbf_linearizations;
     m_cbf_linearization_damping = config.cbf_linearization_damping;
@@ -1222,7 +1249,8 @@ namespace math
     // defaults on a copy; complete inputs are used as they are, so that a
     // control loop that fills everything does not allocate here.
     const bool complete = !in.obstacle_pos.empty() && !in.obstacle_acc.empty() &&
-                          !in.obstacle_radius.empty() && !in.obstacle_delta_H.empty();
+                          !in.obstacle_radius.empty() && !in.obstacle_delta_H.empty() &&
+                          !in.obstacle_sigma.empty();
     ThorInput with_defaults;
     if (!complete)
     {
@@ -1240,17 +1268,20 @@ namespace math
         with_defaults.obstacle_radius.assign(n, 0.0);
       if (in.obstacle_delta_H.empty())
         with_defaults.obstacle_delta_H.assign(n, m_delta_H);
+      if (in.obstacle_sigma.empty())
+        with_defaults.obstacle_sigma.assign(n, m_obstacle_sigma);
     }
     const ThorInput& full = complete ? in : with_defaults;
 
     const std::size_t n_obstacles = full.obstacle_pos.size();
     if (full.obstacle_vel.size() != n_obstacles || full.obstacle_acc.size() != n_obstacles ||
         full.obstacle_radius.size() != n_obstacles || full.obstacle_delta_H.size() != n_obstacles ||
+        full.obstacle_sigma.size() != n_obstacles ||
         (!full.obstacle_axis.empty() && full.obstacle_axis.size() != n_obstacles) ||
         n_obstacles < static_cast<std::size_t>(m_n_obstacle_points))
     {
       throw std::invalid_argument("obstacle_pos, obstacle_vel and, if given, obstacle_acc, obstacle_radius, "
-                                  "obstacle_axis and obstacle_delta_H must have the same size, at least "
+                                  "obstacle_axis, obstacle_delta_H and obstacle_sigma must have the same size, at least "
                                   "n_obstacle_points (" +
                                   std::to_string(m_n_obstacle_points) + ")");
     }
@@ -1258,6 +1289,8 @@ namespace math
     {
       if (!(full.obstacle_radius[k] >= 0.0) || !(full.obstacle_delta_H[k] >= 0.0))
         throw std::invalid_argument("obstacle_radius and obstacle_delta_H must not be negative");
+      if (!(full.obstacle_sigma[k].array() >= 0.0).all())
+        throw std::invalid_argument("obstacle_sigma must not be negative");
       if (!full.obstacle_axis.empty() && !full.obstacle_axis[k].allFinite())
         throw std::invalid_argument("obstacle_axis must be finite");
     }
@@ -1280,7 +1313,7 @@ namespace math
                                                            const std::vector<Eigen::Vector3d> &v_o_vector,
                                                            const std::vector<Eigen::Vector3d> &p_o_vector )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_o_vector, v_o_vector, {}, {}, {}, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_o_vector, v_o_vector, {}, {}, {}, {}, {}});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);
@@ -1293,7 +1326,7 @@ namespace math
                                                            Eigen::VectorXd& next_acc,
                                                            double& next_scaling )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}, {}, {}, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}, {}, {}, {}, {}});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);

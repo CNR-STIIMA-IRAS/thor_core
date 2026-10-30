@@ -1,51 +1,49 @@
 # Barriera nel caso peggiore: `h(ψ_worst)`
 
-Questa nota raccoglie le considerazioni su come rendere la CBF di `ThorQP`
-robusta al rumore di misura su tutto lo stato mappato `ψ`, e non solo sulla
-distanza. È un documento di design: descrive cosa cambiare e perché, ma la
-proposta non è ancora implementata.
+Questa nota descrive come la CBF di `ThorQP` è resa robusta al rumore di
+misura su tutto lo stato mappato `ψ`, e non solo sulla distanza: il
+ragionamento, le scelte fatte e i limiti che restano.
+
+**Stato:** implementato in `thor_math` (§10). Le sezioni 8 e 11.1 correggono
+un'analisi precedente, che sovrastimava il termine su `ḣ`.
 
 **In breve.** L'articolo e `cbf_python` aggiungono `+ h_chi delta_H` alla
-condizione CBF, con `h_chi = ∂h/∂d`. Oggi `thor_math` valuta invece la barriera
-alla distanza peggiore `d - delta_H`. La proposta generalizza questo approccio a
-tutte le componenti di `ψ`: la barriera, `L_f h` e `L_g h` si valutano nel
-punto peggiore `ψ_worst` entro `±3σ_ψ`, con `σ_ψ` propagata dalle incertezze
-sullo stato χ. Il margine così dipende dallo stato, e `C` può scendere verso
-`C₀`.
+condizione CBF, con `h_chi = ∂h/∂d`. `thor_math` valutava già la barriera alla
+distanza peggiore `d - delta_H`. Ora generalizza questo approccio a tutte le
+componenti di `ψ`: la barriera, `L_f h`, `L_g h` e i gradienti si valutano
+nell'angolo peggiore `ψ_worst` della scatola di `±kσ` attorno allo stato
+misurato. Il margine dipende così dallo stato, e `C` può scendere verso `C₀`.
 
 Riferimenti: [robust_margin_deadlock.md](robust_margin_deadlock.md),
 [api.md](api.md), e le eq. (6)–(16) e (28) dell'articolo.
 
 ---
 
-## 1. Situazione attuale
+## 1. Situazione di partenza
 
 La barriera dipende da `ψ = [d, v_r∥, v_h∥, a_h]` (nel codice
 `[d, v_r, v_o, a_o]`):
 
 ```
-h = d_min(ψ) − C                                   se d_min ≥ C
-h = d_min − C + (C − d_min)/C · T_r · v_r∥         se d_min < C   (termine di escape)
+h = d_min(ψ) − C                                     se d_min ≥ C
+h = d_min − C + (C − d_min)/C_e · T_r · v_r∥         se d_min < C   (termine di escape)
 ```
 
-Nel tempo il termine robusto è cambiato tre volte:
+con `C_e = C` prima di questa modifica (vedi §11.2).
+
+Nel tempo il termine robusto è cambiato più volte:
 
 | Versione | Condizione | Problema |
 |---|---|---|
 | Articolo / `cbf_python` | `ḣ + γh + h_chi δ_H ≥ 0` | allenta il vincolo e somma m a m/s |
 | Prima correzione | `ḣ + γ(h − h_chi δ_H) ≥ 0` | deadlock: sul nuovo bordo `L_g h = 0` |
-| Attuale | `h` valutata a `d − δ_H` (raggio gonfiato) | robusta solo su `d`, con `δ_H` costante |
+| Raggio gonfiato | `h` valutata a `d − δ_H` | robusta solo su `d`, con `δ_H` costante |
+| **Attuale** | `h` valutata all'angolo peggiore di `ψ` | vedi §11 |
 
 Una precisazione sul nome: nel codice `h_chi` **non** è il gradiente rispetto
 allo stato χ ∈ R¹⁵. È uno scalare, la sola prima componente del gradiente
-rispetto a ψ ([cbf.cpp](../src/thor_math/cbf.cpp)):
-
-```cpp
-out.h_chi = dh_dpsi(0);   // ∂h/∂d
-```
-
-Il gradiente rispetto a χ, eq. (14), entra solo nel calcolo di `L_f h` e
-`L_g h`.
+rispetto a ψ ([cbf.cpp](../src/thor_math/cbf.cpp)). Il gradiente completo è ora
+`BarrierTerms::dh_dpsi`.
 
 ## 2. L'eq. (28) è già una sensibilità rispetto a ψ
 
@@ -68,42 +66,37 @@ Con `τ_min` sostituito da `T̄_f`, questa è esattamente l'eq. (28), cioè
 `cbf::perceptionMargin()`. Ne seguono due cose:
 
 - `δ_H` contiene già la sensibilità rispetto a ψ. Moltiplicarla ancora per
-  `h_chi` conta due volte la parte su `d`. Dentro il margine `h_chi > 1`, fino
-  a 2.5 nei casi di riferimento.
+  `h_chi` conta due volte la parte su `d`.
 - Usare il `τ_min` vero al posto di `T̄_f` dà un margine **dipendente dallo
   stato**: piccolo quando il minimo è vicino (`τ_min` piccolo), grande solo
   quando serve. È qui il guadagno rispetto a una `C` costante.
 
 ## 3. Restringimento lungo il gradiente: forma linearizzata
 
-Al primo ordine, il caso peggiore di `h` entro `ψ̂ ± 3σ_ψ` vale
+Al primo ordine, il caso peggiore di `h` entro `ψ̂ ± b` vale
 
 ```
-h_worst ≈ h(ψ̂) − Σ_i |∂h/∂ψ_i| 3σ_ψi = h − 3 |∇_ψ h|ᵀ σ_ψ
+h_worst ≈ h(ψ̂) − Σ_i |∂h/∂ψ_i| b_i
 ```
-
-Il segno di ogni contributo dipende dal segno di `∂h/∂ψ_i`. Se è positivo, il
-caso peggiore è `ψ̂_i − 3σ_i`; se è negativo, è `ψ̂_i + 3σ_i`. In entrambi i
-casi la barriera si abbassa.
 
 Applicando la CBF alla barriera robusta:
 
 ```
-ḣ + γ (h − 3 |∇_ψ h|ᵀ σ_ψ) ≥ 0
-⟺   ḣ ≥ −γh + γ · 3 |∇_ψ h|ᵀ σ_ψ
+ḣ + γ (h − Σ_i |∂h/∂ψ_i| b_i) ≥ 0
+⟺   ḣ ≥ −γh + γ · Σ_i |∂h/∂ψ_i| b_i
 ```
 
 **Attenzione al fattore γ.** Il termine robusto è in metri, quindi entra
-moltiplicato per γ [1/s]. La forma `ḣ ≥ −γh + 3|∇_ψ h|ᵀσ_ψ`, senza γ, non è
-equivalente e non è dimensionalmente coerente: somma m a m/s. È lo stesso
-errore del `+ h_chi δ_H` dell'articolo.
+moltiplicato per γ [1/s]. La forma senza γ non è equivalente e non è
+dimensionalmente coerente: somma m a m/s. È lo stesso errore del
+`+ h_chi δ_H` dell'articolo.
 
 ## 4. Perché non basta la forma linearizzata
 
-La forma `γ(h − 3|∇_ψ h|ᵀσ_ψ)` ha lo stesso difetto della prima correzione
+La forma `γ(h − Σ|∂h/∂ψ_i| b_i)` ha lo stesso difetto della prima correzione
 (vedi [robust_margin_deadlock.md](robust_margin_deadlock.md)):
 
-- sposta il bordo del safe set a `h = 3|∇_ψ h|ᵀσ_ψ`, cioè dove `d_min ≥ C`;
+- sposta il bordo del safe set dove `d_min ≥ C`;
 - lì il termine di escape è spento; per un robot fermo o che si allontana
   `∂h/∂v_r∥ = 0` e quindi `L_g h = 0`;
 - la riga CBF degenera in `0 · a_r ≥ −(L_f h + γ(...))`; con un ostacolo
@@ -112,214 +105,251 @@ La forma `γ(h − 3|∇_ψ h|ᵀσ_ψ)` ha lo stesso difetto della prima correz
 Bordo e termine di escape devono spostarsi insieme. La forma linearizzata
 sposta solo il primo.
 
-## 5. Proposta: valutare tutto in `ψ_worst`
+## 5. Soluzione: valutare tutto nell'angolo peggiore
 
-Invece della linearizzazione, si valuta la barriera nel punto peggiore della
-scatola `ψ̂ ± 3σ_ψ`:
-
-```
-ψ_worst = ψ̂ − 3 σ_ψ ⊙ sign(∇_ψ h)
-h_rob   = h(ψ_worst)
-```
-
-Anche `L_f h` e `L_g h` si calcolano in `ψ_worst`, e la condizione resta quella
-standard:
+Invece della linearizzazione, si valuta la barriera nell'angolo peggiore
+della scatola `ψ̂ ± b`. La condizione resta quella standard, con tutti i
+termini calcolati in `ψ_worst`:
 
 ```
-L_f h_rob + L_g h_rob · a_r + γ h_rob ≥ 0
+L_f h(ψ_worst) + L_g h(ψ_worst) · a_r + γ h(ψ_worst) ≥ 0
 ```
 
-È la generalizzazione a tutto ψ di quello che il codice fa oggi su `d`, con il
-raggio gonfiato di `δ_H`. Il termine di escape si attiva quando
-`d_min(ψ_worst) < C`, cioè proprio sul bordo robusto, e il deadlock non si
-presenta.
+È la generalizzazione a tutto ψ del raggio gonfiato di `δ_H`. Il termine di
+escape si attiva quando `d_min(ψ_worst) < C`, cioè proprio sul bordo
+robusto, e il deadlock non si presenta (test
+`RobotAtRestNextToAnUncertainObstacleCanMoveAway`).
 
-### Quando l'angolo della scatola è esatto
+### L'angolo è fisso: `d_min` è monotona in tutte le componenti
 
-Per tre componenti su quattro il caso peggiore non è un'approssimazione. Per
-ogni `τ` fissato, `d(τ)` è:
+Per ogni `τ` fissato, `d(τ)` è:
 
 - crescente in `d⁰` (derivata `1`);
 - non crescente in `v_h∥` (derivata `−τ`);
-- non crescente in `a_h` (derivata `−τ²/2`).
+- non crescente in `a_h` (derivata `−τ²/2`);
+- non decrescente in `v_r∥`: lo spostamento del robot verso l'ostacolo è
+  `v_r τ` nella reazione e `v_r τ + a_s(τ − T_r)²/2` in frenata, entrambi
+  crescenti in `v_r`. Inoltre una `v_r` più grande accorcia la finestra di
+  frenata `T_f = T_r − v_r/a_s`, e il minimo su meno istanti non può
+  scendere.
 
-Il minimo su `τ` di funzioni monotone è monotono, quindi anche `d_min` lo è, e
-l'angolo scelto è il vero minimo nella scatola per `d`, `v_h∥` e `a_h`.
-
-Le eccezioni:
-
-- **`v_r∥`**: `∂d_min/∂v_r∥` può cambiare segno, perché `v_r∥` cambia anche
-  `T_f`. L'incertezza su `v_r∥` è però piccola (vedi §6).
-- **Termine di escape**: `∂h/∂d_min = 1 − T_r v_r∥ / C`, che cambia segno per
-  `v_r∥ > C/T_r` (circa 1.67 m/s con i parametri della Tabella II). Sotto
-  questa velocità, `h` è monotona in `d_min` e l'angolo resta esatto.
-
-In questi casi il segno del gradiente va preso in `ψ̂`, accettando
-l'approssimazione, oppure si valutano i due angoli lungo quella componente e
-si tiene il minimo.
-
-## 6. Propagare `σ_ψ` dall'incertezza sullo stato
-
-Il sensore misura lo stato χ, non ψ. Le incertezze su ψ vanno quindi propagate
-con l'eq. (14):
+Il minimo su `τ` di funzioni monotone è monotono, quindi `d_min` lo è in ogni
+componente e il suo minimo sulla scatola è sempre l'angolo
 
 ```
-Σ_ψ = (∂ψ/∂χ) Σ_χ (∂ψ/∂χ)ᵀ
+ψ_worst = (d − b_d,  v_r∥ − b_vr,  v_h∥ + b_vh,  a_h + b_ah)
 ```
 
-Con incertezze isotrope sull'umano, `Σ_p = σ_p² I`, `Σ_v = σ_v² I`,
-`Σ_a = σ_a² I`, e robot misurato dagli encoder (incertezza trascurabile),
-le varianze marginali sono:
+senza bisogno del segno del gradiente. Il test
+`CbfMinimumDistance.IsMonotoneInEveryComponent` lo verifica su una griglia di
+casi.
+
+Per `h` vale lo stesso fuori dal margine (`h = d_min − C`). Dentro il margine
+`∂h/∂d_min = 1 − T_r v_r∥ / C_e`: l'angolo resta il minimo di `h` finché
+`v_r∥ ≤ C_e / T_r` in tutta la scatola. Oltre, cioè con il robot che si
+allontana velocemente dentro il margine, l'angolo non è più il minimo di `h`.
+È un caso favorevole (il robot sta già scappando) e il parametro `C_escape`
+(§11.2) serve proprio a spostarlo lontano dalle velocità tipiche.
+
+### Come è calcolato nel 3D
+
+`barrierTerms()` sposta le velocità lungo `u` e gonfia il raggio:
+`v_r − b_vr u`, `v_o + b_vo u`, `a_o + b_ao u`, `radius + b_d`. Gli spostamenti
+lungo `u` cambiano solo le proiezioni: `u` e le componenti normali restano
+quelle misurate. Così `L_f h`, `L_g h` e `grad_p` sono esattamente quelli dello
+stato all'angolo (test `VelocityBoundsMoveTheObstacleTowardsTheRobot`).
+
+## 6. Dai bound sullo stato ai bound su ψ
+
+Il sensore misura lo stato dell'ostacolo, non ψ. Con incertezze isotrope di
+semi-ampiezza `b_p`, `b_v`, `b_a` su posizione, velocità e accelerazione
+dell'ostacolo, e robot misurato dagli encoder, i bound su ψ al primo ordine
+sono:
 
 ```
-σ_d²    = σ_p²
-σ_vr∥²  = σ_p² |P v_r|² / d²
-σ_vh∥²  = σ_v² + σ_p² |P v_h|² / d²
-σ_ah²   = σ_a² + σ_p² |P v̇_h|² / d²
+b_d   = b_p
+b_vr  = b_p |P v_r| / D
+b_vo  = b_v + b_p |P v_o| / D
+b_ao  = b_a + b_p |P a_o| / D
 ```
 
-con `P = I − u uᵀ`, eq. (15). Osservazioni:
+con `P = I − u uᵀ` (eq. 15) e `D = |p_r − p_o|`. Sono **somme**, non radici di
+varianze, perché descrivono una scatola di caso peggiore (§7):
+`|Δ(w·u)| ≤ |Δw| + |w| |Δu|`, e l'errore di posizione ruota `u` di al più
+`b_p / D`. Osservazioni:
 
 - **`v_r∥` non è esatta** anche se il robot è misurato perfettamente: l'errore
   su `p_h` ruota `u`, e quindi cambia la proiezione.
-- **I termini `1/d` crescono vicino all'umano**, cioè proprio dove il margine
-  conta. Un `σ_ψ` diagonale costante li ignora.
-- **Correlazioni.** Con `Σ_p` isotropa, `d` è scorrelata dalle proiezioni
-  (`uᵀP = 0`), ma `v_r∥`, `v_h∥` e `a_h` sono correlate tra loro attraverso
-  `P/d`. Con la scatola del §5 servono solo le σ marginali; le correlazioni
-  contano solo per la variante RSS (§7).
+- **I termini `1/D` crescono vicino all'ostacolo**, cioè proprio dove il
+  margine conta.
+- **Con un moto radiale** (velocità parallele a `u`) restano solo `b_d = b_p`,
+  `b_vo = b_v`, `b_ao = b_a`. Con solo `b_p` il risultato coincide con il
+  raggio gonfiato `δ_H = b_p` (test `RadialPositionBoundInflatesTheRadius` e
+  `PositionSigmaOnAStaticSceneIsDeltaH`).
+
+`ThorQP` costruisce i bound da `obstacle_sigma = (σ_p, σ_v, σ_a)` e
+`sigma_bound = k`. Lungo l'orizzonte l'ostacolo è estrapolato ad
+accelerazione costante fino al tempo `t` del nodo, e gli errori si sommano:
+
+```
+b_p(t) = k (σ_p + σ_v t + σ_a t²/2)
+b_v(t) = k (σ_v + σ_a t)
+b_a    = k σ_a
+```
+
+Il test `CornerIsTheMinimumOverTheBox` campiona stati veri nella scatola 3D
+(posizione compresa, che ruota `u`) e verifica che nessuno dia una `h` più
+bassa dell'angolo, a meno di termini del secondo ordine.
 
 ## 7. Somma o RSS
 
 Ci sono due modi di combinare le componenti:
 
 ```
-somma:   Δ = 3 Σ_i |∂h/∂ψ_i| σ_ψi           (scatola, caso peggiore)
-RSS:     Δ = 3 σ_h,   σ_h = √(∇_ψhᵀ Σ_ψ ∇_ψh)   (gaussiana, linearizzata)
+somma:   Δ = Σ_i |∂h/∂ψ_i| b_i                     (scatola, caso peggiore)
+RSS:     Δ = k σ_h,   σ_h = √(∇_ψhᵀ Σ_ψ ∇_ψh)      (gaussiana, linearizzata)
 ```
 
-Vale sempre `σ_h ≤ Σ_i |∂h/∂ψ_i| σ_ψi`, quindi la RSS è meno conservativa. La
-somma è coerente con l'idea di "caso peggiore entro ±3σ" e con la valutazione
-in `ψ_worst`. Per un argomento di sicurezza ISO 10218 è la scelta consigliata.
-La RSS richiede errori gaussiani, la linearità di `h` e la covarianza piena del
-§6, non solo la diagonale.
+Vale sempre `σ_h ≤ Σ_i |∂h/∂ψ_i| σ_i`, quindi la RSS è meno conservativa. La
+valutazione nell'angolo corrisponde alla somma ed è coerente con l'idea di
+"caso peggiore entro ±kσ". Per un argomento di sicurezza ISO 10218 è la scelta
+fatta. La RSS richiederebbe errori gaussiani, la linearità di `h` e la
+covarianza piena di ψ (le componenti sono correlate attraverso `u`).
 
-## 8. Robustezza su `ḣ`: un secondo termine
+## 8. Robustezza su `ḣ`
 
-`ψ_worst` protegge `h`, ma `L_f h` e `L_g h` sono comunque calcolati su
-grandezze stimate. Le CBF robuste alla misura (Dean et al. 2020, Cosner et al.
-2021) aggiungono un secondo termine, che stringe la condizione sulla derivata:
+**Correzione.** Una versione precedente di questa nota stimava il termine su
+`ḣ` derivando `L_f h + L_g h · a_r` rispetto a ψ, in modo simmetrico attorno
+al punto misurato (circa 0.6 m/s). Con la barriera valutata nell'angolo il
+ragionamento giusto è un altro, e il termine è molto più piccolo.
+
+La barriera robusta è `h_rob(ψ̂) = h(ψ̂ − b⊙s)`, con `s` il segno dell'angolo.
+Con errori di misura che non cambiano nel tempo, la sua derivata lungo il
+moto vero è
 
 ```
-L_f h_rob + L_g h_rob · a_r + γ h_rob − 3 |∇_ψ ḣ|ᵀ σ_ψ ≥ 0
+d/dt h_rob = ∇_ψ h(ψ_worst) · ψ̇(stato vero)
 ```
 
-Questo termine è già in m/s e va **senza** γ. Con `a_h` stimata, che è la
-componente più rumorosa, è probabilmente il più grande dei due. Valutare
-`L_f h` e `L_g h` in `ψ_worst` ne copre una parte, ma non in modo garantito:
-l'angolo peggiore per `h` non è necessariamente quello peggiore per `ḣ`.
+con il gradiente **fisso all'angolo**: non entrano derivate seconde di `h`.
+`L_f h + L_g h · a_r` usa invece `ψ̇(ψ_worst)`. L'errore è quindi solo
+`∇_ψ h(ψ_worst) · (ψ̇(vero) − ψ̇(ψ_worst))`, e si scompone così:
+
+- **Parte di controllo.** `(∂h/∂v_r) u · a_r` non cambia, perché gli errori non
+  spostano `u` (al primo ordine). Quindi **non serve l'accelerazione del
+  robot**: la scelta di congelare `a_r` al ciclo precedente non è più
+  necessaria.
+- **Velocità e accelerazione.** Dall'angolo, le velocità e l'accelerazione
+  vere differiscono di `[0, 2b]` nella direzione favorevole: ad esempio
+  `ḋ = v_r − v_o` vero è maggiore o uguale a quello dell'angolo. Contribuiscono
+  solo dove `∂h/∂d < 0` o `∂h/∂v_o > 0`, cioè nel regime in cui il termine di
+  escape ha pendenza negativa (`v_r > C_e / T_r`).
+- **Distanza.** I termini di rotazione di `ψ̇` scalano con `1/D` e cambiano
+  con l'errore di distanza `±b_d`.
+
+Il risultato è `BarrierTerms::rate_bound`, in m/s:
+
+```
+rate_bound = |Σ_{i=1..3} ∂h/∂ψ_i · rot_i| / D · b_d
+           + 2 max(0, −∂h/∂d) (b_vr + b_vo)
+           + 2 max(0, ∂h/∂v_o) b_ao
+```
+
+dove `rot_i` sono i termini di rotazione di `ψ̇`. Nella formulazione continua,
+con `cbf_robust_rate = true`, viene sottratto dalla condizione **senza** γ.
+La formulazione discreta vincola `h` a ogni nodo e non lo usa.
+
+Il test `RateBoundCoversTheTrueRate` verifica che `ḣ` vero non scenda sotto
+`ḣ(ψ_worst) − rate_bound`, sia con campioni nella scatola sia con il solo
+errore di posizione (che altrimenti sarebbe nascosto dagli errori di velocità,
+sempre favorevoli).
+
+**Cosa non copre:**
+
+- errori di misura che cambiano nel tempo (rumore non filtrato): `ψ̂̇`
+  contiene anche la derivata dell'errore, che qui è assunta nulla;
+- la rotazione di `u` dovuta all'errore di posizione nei termini di `ψ̇`;
+- la dipendenza dei bound dallo stato (`|P v|/D`): nei gradienti e nelle
+  derivate di Lie i bound sono trattati come costanti.
 
 ## 9. Conseguenze su `C`
 
 Se l'incertezza di percezione entra nella barriera tramite `ψ_worst`, non deve
-restare anche dentro `C`. Altrimenti è contata due volte, perché l'eq. (28) è
-la stessa somma del §2 con `τ_min → T̄_f`. `C` deve tornare verso `C₀`, più
-quello che il modello non copre (jerk non modellato, latenze), secondo la
-valutazione del rischio.
+restare anche dentro `C` né in `δ_H`. Altrimenti è contata due volte, perché
+l'eq. (28) è la stessa somma del §2 con `τ_min → T̄_f`. `C` deve tornare verso
+`C₀`, più quello che il modello non copre (§11.3).
 
-## 10. Piano di implementazione
+## 10. Implementazione
 
-1. In `cbf.cpp`, una funzione che, dati `ψ̂` e `σ_ψ`, restituisce `ψ_worst`
-   (§5). Il segno del gradiente si prende da `dh_dpsi`, già calcolato.
-2. Propagazione di `σ_ψ` dalle incertezze dell'ostacolo (§6). Nuovi campi per
-   ostacolo in `ThorInput`, ad esempio `obstacle_sigma_p`, `obstacle_sigma_v`,
-   `obstacle_sigma_a`, al posto di `obstacle_delta_H` o accanto a esso.
-3. `barrierTerms()` valuta `h`, `L_f h` e `L_g h` in `ψ_worst`. Il gonfiaggio
-   del raggio con `δ_H` diventa un caso particolare (solo `σ_d`).
-4. Opzionale e separato: il termine su `ḣ` del §8, da attivare con un flag.
-5. Test:
-   - con `σ_ψ = 0` il risultato coincide con quello attuale;
-   - con solo `σ_d > 0` coincide con il raggio gonfiato;
-   - non-regressione del deadlock (`RobotAtRestInsideTheRobustBandCanMoveAway`)
-     con σ su tutte le componenti;
-   - `h(ψ_worst)` confrontata con il minimo per forza bruta sugli angoli della
-     scatola;
-   - `σ_ψ` propagata confrontata con un Monte Carlo sullo stato.
+| Cosa | Dove |
+|---|---|
+| Bound su ψ e valutazione nell'angolo | `cbf::PerceptionBounds`, argomento `bounds` di `cbf::barrierTerms()` e `cbf::capsuleBarrierTerms()`, `BarrierTerms::psi_bound` |
+| Bound dell'errore di `ḣ` | `BarrierTerms::rate_bound` |
+| Gradiente completo | `BarrierTerms::dh_dpsi` |
+| Scala del termine di escape | `ThorConfig::C_escape`, argomento `C_escape` di `cbf::barrier()` |
+| Deviazioni standard | `ThorInput::obstacle_sigma` (per ostacolo), `ThorConfig::obstacle_sigma` (default), `ThorConfig::sigma_bound` |
+| Termine su `ḣ` nel QP | `ThorConfig::cbf_robust_rate` (solo formulazione continua) |
+| Estrapolazione dei bound | `perceptionBounds()` in [thor_math.cpp](../src/thor_math/thor_math.cpp) |
 
-## 11. Punti aperti: analisi e proposte
+Con tutte le deviazioni standard a zero il comportamento è identico a prima:
+i test esistenti, compresi i riferimenti Python a 1e-12, passano invariati, e
+l'esempio `cbf_mpc_example` dà gli stessi numeri.
+
+Le diagnostiche (`CbfDiagnostics::distance`, `v_robot`, `v_obstacle`)
+riportano i valori **misurati**; `h_now` e `h_min` sono all'angolo.
+
+Test aggiunti:
+
+- `CbfMinimumDistance.IsMonotoneInEveryComponent`
+- `CbfBarrier.EscapeScaleSetsOnlyTheSlope`
+- `CbfPerceptionBounds.VelocityBoundsMoveTheObstacleTowardsTheRobot`
+- `CbfPerceptionBounds.RadialPositionBoundInflatesTheRadius`
+- `CbfPerceptionBounds.CornerIsTheMinimumOverTheBox`
+- `CbfPerceptionBounds.RateBoundCoversTheTrueRate`
+- `ThorQpIntegrationTest.PositionSigmaOnAStaticSceneIsDeltaH`
+- `ThorQpIntegrationTest.RobotAtRestNextToAnUncertainObstacleCanMoveAway`
+- validazione degli input in `CbfConfigurationRequiresMatchingModel` e
+  `CbfUsesSphereRadiiAndPerObstacleDeltaH`
+
+## 11. Punti aperti: analisi e scelte
 
 Le stime numeriche di questa sezione sono ordini di grandezza, calcolati con i
 valori delle Tabelle II e III dell'articolo: `γ = 9.65`, `T_r = 0.15 s`,
 `C = 0.25 m`, `σ_p = 0.02 m`, `σ_v = 0.085 m/s`, `σ_a = 0.39 m/s²`.
 
-### 11.1 Il termine su `ḣ` (§8) non è trascurabile
+### 11.1 Il termine su `ḣ`
 
-Confronto dei due termini robusti, entrambi in m/s:
+Superato dal §8. La stima precedente (circa 0.25 + 0.35 m/s, un terzo del
+termine su `h`) derivava `ḣ` attorno al punto misurato. Con la barriera
+nell'angolo, velocità e accelerazione non contribuiscono al primo ordine
+(salvo il regime di escape a pendenza negativa), e il termine si riduce alla
+parte dovuta all'errore di distanza nei termini di rotazione. Non serve
+congelare `a_r`, e il calcolo è analitico, senza differenze finite.
 
-| Termine | Stima | Origine |
-|---|---|---|
-| su `h`: `γ · 3 \|∇_ψ h\|ᵀ σ_ψ` | ≈ 9.65 × 0.19 ≈ 1.8 m/s | la parte di `C` che oggi viene dall'eq. (28) |
-| su `ḣ`, da `σ_v` | ≈ 3 × 0.085 ≈ 0.25 m/s | `ḋ = v_r∥ − v_h∥`, quindi `∂ḣ/∂v_h∥ ≈ −1` |
-| su `ḣ`, da `σ_a` | ≈ 0.3 × 1.2 ≈ 0.35 m/s | `≈ τ_min · 3σ_a` |
+### 11.2 `v_r∥` e il termine di escape — implementato
 
-Il termine su `ḣ` vale circa un terzo di quello su `h`: ignorarlo non è una
-scelta neutra.
-
-**Il problema.** `ḣ = L_f h + L_g h · a_r`, quindi `∇_ψ ḣ` contiene anche
-`∂(L_g h)/∂ψ · a_r`. Il termine robusto diventa
-
-```
-Σ_i | ∂L_f h/∂ψ_i + ∂L_g h/∂ψ_i · a_r | · 3σ_ψi
-```
-
-e dipende dal controllo. Ci sono tre modi di trattarlo:
-
-| Opzione | Pro | Contro |
-|---|---|---|
-| Forma di Cosner `a + b‖u‖`, con `‖a_r‖ ≤ a_max` | resta lineare | conservativa |
-| Variabili ausiliarie `t_i ≥ ±(...)` | esatta e convessa | 4 variabili e 8 righe per coppia: con 126 coppie troppe per i 2 ms |
-| `a_r` congelato alla soluzione del ciclo precedente | lineare, zero righe in più | approssimazione al primo ordine nel tempo |
-
-**Proposta:** `a_r` congelato al ciclo precedente. È coerente con il resto di
-`ThorQP`, che è già sequenziale e usa la predizione del ciclo prima per gli
-intervalli futuri.
-
-**Calcolo delle derivate:** differenze finite su `ψ`, con 8 valutazioni in
-forma chiusa di `barrierTerms()` per coppia, a costo trascurabile. Le derivate
-seconde analitiche di `d_min`, definita a tratti, sono fragili e non ne vale la
-pena.
-
-### 11.2 `v_r∥` e il segno del termine di escape (§5)
-
-**`v_r∥` non ha incertezza trascurabile.** Vicino all'umano
-`σ_vr∥ = σ_p |P v_r| / d` (§6). Con `d = 0.3 m` e `|P v_r| = 1 m/s` si ha
-`3σ_vr∥ ≈ 0.2 m/s`.
-
-**Proposta:** lungo `v_r∥` valutare entrambi gli angoli della scatola e tenere
-il minimo. Costa 2 valutazioni. La `h_rob` risultante è il minimo di due
-funzioni lisce, ma la barriera è già definita a tratti, quindi non cambia nulla
-di sostanziale.
+**`v_r∥` non ha incertezza trascurabile.** Vicino all'ostacolo
+`b_vr = b_p |P v_r| / D` (§6). Con `D = 0.3 m`, `|P v_r| = 1 m/s` e
+`b_p = 3σ_p = 0.06 m` si ha `b_vr ≈ 0.2 m/s`. Grazie alla monotonia (§5) non
+serve valutare due angoli: l'angolo con `v_r∥ − b_vr` è sempre il minimo di
+`d_min`.
 
 **Il cambio di segno dell'escape dipende da `C`.** Il termine di escape cambia
-segno per `v_r∥ > C / T_r`:
+segno per `v_r∥ > C_e / T_r`:
 
-- con `C = 0.25 m` (oggi) la soglia è 1.67 m/s, lontana dalle velocità tipiche;
+- con `C = 0.25 m` la soglia è 1.67 m/s, lontana dalle velocità tipiche;
 - se `C` scende verso `C₀ = 0.06 m` (§9), la soglia diventa **0.4 m/s**, una
   velocità normale.
 
-Anche la pendenza dell'escape, `(C − d_min)/C · T_r`, diventa molto più
-ripida. Ridurre `C` cambia quindi il comportamento dell'escape, non solo il
-margine.
+**Scelta:** `ThorConfig::C_escape` separa la scala dell'escape da `C`. Il
+termine parte sempre da `d_min = C` (necessario contro il deadlock), ma la
+pendenza è `T_r v_r / C_escape`. Con `C_escape = 0` si usa `C`, come prima.
 
-**Proposta:** separare il parametro dell'escape da `C`, ad esempio con un
-`C_esc` fisso oppure `C + Δ`, così margine ed escape si tarano in modo
-indipendente.
-
-### 11.3 Il valore di `C` (§9): errore di misura ed errore di modello
+### 11.3 Il valore di `C`: errore di misura ed errore di modello
 
 L'eq. (28) mescola due errori di natura diversa:
 
-- **errore di misura**: `σ_p`, `σ_v` e `σ_a` dei sensori. Con questa proposta
+- **errore di misura**: `σ_p`, `σ_v` e `σ_a` dei sensori. Con questa modifica
   entra in `ψ_worst`;
 - **errore di modello**: l'accelerazione dell'umano non è costante
   sull'orizzonte. Il testo dell'articolo dice che `C` assorbe il jerk non
@@ -329,8 +359,8 @@ Il jerk non si può coprire nel caso peggiore. Con jerk tra 100 e 1000 m/s³
 [19] e `T_f = 0.3 s`, `j T³ / 6` vale tra 0.45 e 4.5 m. Va trattato in modo
 statistico.
 
-**Proposta:** calibrare l'errore di modello sui dati registrati. Per ogni
-istante del dataset umano:
+**Proposta (in attesa del dataset):** calibrare l'errore di modello sui dati
+registrati. Per ogni istante del dataset umano:
 
 1. predire `d(τ)` con il modello ad accelerazione costante, eq. (6b)/(7c);
 2. confrontarla con la distanza vera registrata, per `τ ∈ [0, T̄_f]`;
@@ -352,13 +382,17 @@ Va deciso quale numero è quello vero:
   o è un'etichetta rimasta da una versione precedente? Con l'eq. (28) si ha
   `C ≈ 0.25 m` già senza `Δ_H`.
 
-Il commento di `perceptionMargin()` cita ancora l'"Eq. 9" di una versione
-precedente dell'articolo: va aggiornato all'eq. (28).
+Il commento di `perceptionMargin()` citava l'"Eq. 9" di una versione
+precedente dell'articolo: ora cita l'eq. (28).
 
-### 11.5 Decisioni in sospeso
+### 11.5 Decisioni
 
-- [ ] Termine su `ḣ` con `a_r` congelato al ciclo precedente (§11.1).
-- [ ] Separare il parametro dell'escape da `C` (§11.2).
+- [x] Termine su `ḣ`: analitico, nell'angolo, senza `a_r` (§8); opzionale con
+      `cbf_robust_rate`.
+- [x] Separare la scala dell'escape da `C` (`C_escape`, §11.2).
 - [ ] Script di calibrazione di `C_modello` sul dataset umano registrato
-      (§11.3); serve la posizione del dataset.
+      (§11.3): in attesa del dataset.
 - [ ] Valori di `C₀` e `Δ_H` usati negli esperimenti (§11.4).
+- [ ] Esporre `obstacle_sigma`, `sigma_bound`, `C_escape` e `cbf_robust_rate`
+      come parametri ROS in `thor_controllers`.
+- [ ] Coprire gli errori che cambiano nel tempo (§8, *Cosa non copre*).

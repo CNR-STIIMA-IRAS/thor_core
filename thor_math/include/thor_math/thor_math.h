@@ -307,8 +307,12 @@ struct ThorConfig
   double a_s     = 0.0;    ///< Robot braking deceleration in the `d_min` formula [m/s^2] (> 0).
   double T_r     = 0.0;    ///< Reaction time before braking [s] (>= 0).
   double C       = 0.0;    ///< Safety margin `C_0` between the robot and obstacle surfaces [m] (> 0).
+  double C_escape = 0.0;   ///< Scale of the escape term of the barrier [m] (>= 0); 0 means #C. The term starts at `d_min = C` and has slope `T_r v_r / C_escape`; a larger value keeps `h` increasing in `d_min` up to a robot speed of `C_escape / T_r` (see cbf::barrier()).
   double gamma   = 0.0;    ///< Class-K gain of `dh/dt + gamma h >= 0` [1/s].
-  double delta_H = 0.0;    ///< Default distance estimation error [m] (>= 0), used when ThorInput::obstacle_delta_H is empty. The barrier is evaluated at the worst-case distance, i.e. the obstacle is inflated by delta_H; see cbf::perceptionMargin().
+  double delta_H = 0.0;    ///< Default distance estimation error [m] (>= 0), used when ThorInput::obstacle_delta_H is empty. The barrier is evaluated at the worst-case distance, i.e. the obstacle is inflated by delta_H; see cbf::perceptionMargin(). Do not count the same noise here and in #obstacle_sigma.
+  Eigen::Vector3d obstacle_sigma = Eigen::Vector3d::Zero();  ///< Default standard deviations of the obstacle position [m], velocity [m/s] and acceleration [m/s^2] (>= 0), used when ThorInput::obstacle_sigma is empty. The barrier is evaluated at the worst corner of the box of #sigma_bound standard deviations, extrapolated to each prediction time (see docs/worst_case_h_design.md).
+  double sigma_bound = 3.0;  ///< Number of standard deviations of the perception box (>= 0).
+  bool   cbf_robust_rate = false;  ///< CbfFormulation::continuous only: also subtracts the bound of the error of `dh/dt` caused by #obstacle_sigma (cbf::BarrierTerms::rate_bound). The discrete formulation constrains `h` at every node and does not need it.
   double cbf_activation_distance = 5.0;  ///< If the lowest barrier over the horizon is above this value [m], the CBF rows are dropped from the QP.
   std::vector<unsigned int> cbf_frame_ids;  ///< Pinocchio frame ids of the centers of the monitored robot spheres.
   std::vector<double> cbf_frame_radii;  ///< Radius of each robot sphere [m] (>= 0), same size as #cbf_frame_ids; empty means points.
@@ -325,9 +329,10 @@ struct ThorConfig
  *   (no obstacle);
  * - otherwise #obstacle_pos and #obstacle_vel must have the same size, at
  *   least ThorConfig::n_obstacle_points;
- * - #obstacle_acc, #obstacle_radius, #obstacle_axis and #obstacle_delta_H may
- *   be empty (defaults: zero acceleration, zero radius, spheres,
- *   ThorConfig::delta_H) or have the size of #obstacle_pos.
+ * - #obstacle_acc, #obstacle_radius, #obstacle_axis, #obstacle_delta_H and
+ *   #obstacle_sigma may be empty (defaults: zero acceleration, zero radius,
+ *   spheres, ThorConfig::delta_H, ThorConfig::obstacle_sigma) or have the size
+ *   of #obstacle_pos.
  *
  * Each obstacle is a sphere, or a capsule (cylinder with hemispherical ends)
  * if its #obstacle_axis is not zero: see cbf::capsuleBarrierTerms().
@@ -347,6 +352,7 @@ struct ThorInput
   std::vector<double> obstacle_radius;        ///< Obstacle sphere or capsule radii [m] (>= 0); empty means points.
   std::vector<double> obstacle_delta_H;       ///< Distance estimation error of each point [m] (>= 0), added to its radius by the barrier; empty means ThorConfig::delta_H for all.
   std::vector<Eigen::Vector3d> obstacle_axis; ///< Capsule half axes [m]: the axis goes from `obstacle_pos - obstacle_axis` to `obstacle_pos + obstacle_axis`, fixed in orientation. Zero for a sphere; empty means spheres for all.
+  std::vector<Eigen::Vector3d> obstacle_sigma; ///< Standard deviations of the position [m], velocity [m/s] and acceleration [m/s^2] of each point (>= 0); empty means ThorConfig::obstacle_sigma for all.
 };
 
 /**
@@ -364,9 +370,9 @@ struct CbfDiagnostics
   double       h_min          = 0.0;  ///< Lowest barrier value over the horizon [m]; it can be negative on predicted states even if the actual motion is safe.
   unsigned int interval       = 0;    ///< Prediction node of #h_min: 0 is the current state, `i` the start of interval `i`, `n_intervals` the end of the horizon (discrete only).
   unsigned int frame_id       = 0;    ///< Pinocchio frame id of the robot sphere.
-  double       distance       = 0.0;  ///< Estimated distance between the robot and obstacle surfaces [m], not reduced by delta_H (negative if they overlap).
-  double       v_robot        = 0.0;  ///< Robot velocity along `(p_r - p_o)/|p_r - p_o|` [m/s], with `p_o` the closest point of a capsule axis; negative when approaching.
-  double       v_obstacle     = 0.0;  ///< Obstacle velocity along the same direction [m/s]; positive when approaching.
+  double       distance       = 0.0;  ///< Estimated distance between the robot and obstacle surfaces [m], not reduced by delta_H or the perception bounds (negative if they overlap).
+  double       v_robot        = 0.0;  ///< Robot velocity along `(p_r - p_o)/|p_r - p_o|` [m/s], with `p_o` the closest point of a capsule axis; negative when approaching. Measured, not at the worst corner.
+  double       v_obstacle     = 0.0;  ///< Obstacle velocity along the same direction [m/s]; positive when approaching. Measured, not at the worst corner.
   unsigned int obstacle_index = 0;    ///< Index of the obstacle point in ThorInput::obstacle_pos.
 };
 
@@ -489,6 +495,10 @@ class ThorQP
     double             m_a_s, m_T_r, m_C; // parameters from d_min formula
     double             m_gamma;           // CBF gain
     double             m_delta_H;         // distance estimation error
+    double             m_C_escape = 0.0;  // scale of the escape term (0: m_C)
+    Eigen::Vector3d    m_obstacle_sigma = Eigen::Vector3d::Zero();  // default perception standard deviations
+    double             m_sigma_bound = 3.0;  // standard deviations of the perception box
+    bool               m_cbf_robust_rate = false;  // bound of the dh/dt error (continuous only)
     double             m_h;               // barrier value
     int                m_n_obstacle_points; // number of obstacle points considered
     std::vector<unsigned int> m_frameIds;
@@ -562,7 +572,7 @@ class ThorQP
      *
      * Called by solve() with validated inputs; with the CBF enabled the
      * obstacle vectors have at least `n_obstacle_points` elements and
-     * ThorInput::obstacle_acc, obstacle_radius and obstacle_delta_H are filled; obstacle_axis is empty or has their size. Subclasses override this, so that the public solve() and
+     * ThorInput::obstacle_acc, obstacle_radius, obstacle_delta_H and obstacle_sigma are filled; obstacle_axis is empty or has their size. Subclasses override this, so that the public solve() and
      * computedCostrainedSolution() are never hidden.
      * @throws std::runtime_error if the problem is infeasible.
      */
@@ -667,6 +677,10 @@ class ThorQP
         m_C = other.m_C;
         m_gamma = other.m_gamma;
         m_delta_H = other.m_delta_H;
+        m_C_escape = other.m_C_escape;
+        m_obstacle_sigma = other.m_obstacle_sigma;
+        m_sigma_bound = other.m_sigma_bound;
+        m_cbf_robust_rate = other.m_cbf_robust_rate;
 
         m_use_cbf = other.m_use_cbf;
         m_model = other.m_model;

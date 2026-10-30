@@ -136,6 +136,34 @@ with position, velocity and acceleration. The robot is covered by spheres.
     not change the distance);
   - the example models the body of the person as a vertical capsule.
 
+- **Perception bounds on the whole obstacle state.** The barrier can be
+  evaluated at the worst corner of the box of possible true obstacle states,
+  not only at the worst-case distance. See `docs/worst_case_h_design.md`.
+  - `ThorInput::obstacle_sigma` and `ThorConfig::obstacle_sigma`: standard
+    deviations of the obstacle position, velocity and acceleration;
+    `ThorConfig::sigma_bound` (default 3) sets the box half-width. The box
+    grows along the extrapolation of the obstacle over the horizon.
+  - `cbf::PerceptionBounds` and the new trailing arguments `bounds` of
+    `cbf::barrierTerms()` and `cbf::capsuleBarrierTerms()`. `d_min` is monotone
+    in every component of `psi`, so its minimum over the box is a fixed corner;
+    `h`, the Lie derivatives and the gradients are evaluated there. The
+    position bound also rotates `u`, which widens the bounds of the projected
+    velocities near the obstacle (`BarrierTerms::psi_bound`).
+  - `BarrierTerms::rate_bound`: bound of the error of `dh/dt` when the true
+    state is elsewhere in the box. `ThorConfig::cbf_robust_rate` subtracts it
+    in the continuous formulation; it is a rate and is not multiplied by
+    `gamma`.
+  - `BarrierTerms::dh_dpsi`: the full gradient of `h` with respect to `psi`.
+  - With zero standard deviations nothing changes. With only `sigma_p` and a
+    radial motion the result is the same as `delta_H = sigma_bound sigma_p`.
+- **Scale of the escape term.** `ThorConfig::C_escape` and the trailing
+  argument `C_escape` of `cbf::barrier()`, `cbf::barrierTerms()` and
+  `cbf::capsuleBarrierTerms()`: the escape term becomes
+  `(C - d_min)/C_escape * T_r * v_r`. It still starts at `d_min = C`; only its
+  slope changes. `h` stays increasing in `d_min` up to `v_r = C_escape / T_r`,
+  so a small `C` no longer flips the slope at ordinary speeds. 0 (the
+  default) means `C`.
+
 ### Changed
 
 - **The CBF formulation.** The barrier was `h(d, v_rel)`, written by hand for a

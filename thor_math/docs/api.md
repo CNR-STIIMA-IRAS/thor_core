@@ -203,7 +203,21 @@ and obstacle `k`:
 - **Barrier.** `h = d_min - C`, where `d_min` is the minimum of that distance
   if the robot reacts after `T_r` and then brakes at `a_s`, while the
   obstacle keeps its acceleration (section 5). `C` is the safety margin
-  between the surfaces. The safe set is `h >= 0`.
+  between the surfaces. The safe set is `h >= 0`. Inside the margin an
+  escape term with scale `C_escape` (default `C`) lets a receding robot
+  raise `h`.
+- **Perception bounds.** With `obstacle_sigma[k]` (or
+  `ThorConfig::obstacle_sigma`) the obstacle position, velocity and
+  acceleration are known within `sigma_bound` standard deviations. The box
+  grows along the extrapolation to the prediction time `t`:
+  `b_p = k (sigma_p + sigma_v t + sigma_a t²/2)`, `b_v = k (sigma_v + sigma_a t)`,
+  `b_a = k sigma_a`. `d_min` is monotone in every component of
+  `psi = [d, v_r, v_o, a_o]`, so the barrier, its Lie derivatives and its
+  gradients are evaluated at the worst corner of the box
+  (`cbf::barrierTerms()`; design and limits in
+  [worst_case_h_design.md](worst_case_h_design.md)). With only `sigma_p` and
+  a radial motion this is the same as `delta_H = sigma_bound sigma_p`; do not
+  count the same noise in both.
 - **Condition.** One row for every interval `i`, robot sphere and
   obstacle. `ThorConfig::cbf_formulation` selects how it is written; the two
   formulations are described below.
@@ -257,6 +271,11 @@ L_g h (J u_i + dJ dq) + L_f h + gamma h >= 0
 - **Terms.** `L_f h` and `L_g h` are the Lie derivatives of `h`;
   `J u_i + dJ dq` is the acceleration of the frame. Radii and `delta_H` are
   constant, so the Lie derivatives are the same as for points.
+- **Robust rate (`cbf_robust_rate`).** With perception bounds, the condition
+  also subtracts `BarrierTerms::rate_bound`, the bound of the error of
+  `dh/dt` when the true obstacle state is elsewhere in the box. It is a
+  rate, not multiplied by `gamma`. The discrete formulation constrains `h`
+  at every node and does not use it.
 - **Relation to the paper.** With `n_intervals = 1` this is the one-step
   controller of the paper.
 - **Limitation.** It constrains only the rate of `h` at one instant per
@@ -513,8 +532,12 @@ Settings applied by `ThorQP::configure()`. Vectors have size `n_joints`.
 | `a_s` | 0 | robot braking deceleration [m/s²] | > 0 (CBF) |
 | `T_r` | 0 | reaction time [s] | >= 0 (CBF) |
 | `C` | 0 | safety margin [m] | > 0 (CBF) |
+| `C_escape` | 0 | scale of the escape term of the barrier [m]; 0 means `C` | >= 0 (CBF) |
 | `gamma` | 0 | CBF gain [1/s] | |
 | `delta_H` | 0 | default distance estimation error [m], inflates every obstacle | >= 0 (CBF) |
+| `obstacle_sigma` | 0 | default standard deviations of the obstacle position [m], velocity [m/s] and acceleration [m/s²] | >= 0 (CBF) |
+| `sigma_bound` | 3 | standard deviations of the perception box | >= 0 (CBF) |
+| `cbf_robust_rate` | false | continuous formulation: subtract the bound of the `dh/dt` error | |
 | `cbf_activation_distance` | 5.0 | drop the CBF rows above this `h` [m] | |
 | `cbf_frame_ids` | empty | Pinocchio frame ids of the robot points | < `model.frames.size()` |
 | `cbf_frame_radii` | empty | radius of each robot sphere [m]; empty means points | empty or size of `cbf_frame_ids`; >= 0 |
@@ -534,6 +557,7 @@ Settings applied by `ThorQP::configure()`. Vectors have size `n_joints`.
 | `obstacle_radius` | empty or same | sphere or capsule radii [m] (>= 0); empty means points |
 | `obstacle_delta_H` | empty or same | distance estimation error of each obstacle [m] (>= 0); empty means `ThorConfig::delta_H` |
 | `obstacle_axis` | empty or same | capsule half axes [m], from `obstacle_pos` to one end, finite; zero for a sphere, empty means spheres |
+| `obstacle_sigma` | empty or same | standard deviations of the position [m], velocity [m/s] and acceleration [m/s²] of each obstacle (>= 0); empty means `ThorConfig::obstacle_sigma` |
 
 With the CBF disabled, the obstacle fields are ignored. With the CBF enabled
 and `obstacle_pos`, `obstacle_vel` and `obstacle_acc` all empty,
@@ -656,15 +680,18 @@ The candidates are:
 stop time on `v_r`. The result can be negative, which means a contact is
 unavoidable. Throws `std::invalid_argument` if `a_s <= 0`.
 
-### `double barrier(d, v_r, v_o, a_o, T_r, a_s, C, atol, Eigen::Vector4d& jacobian)`
+### `double barrier(d, v_r, v_o, a_o, T_r, a_s, C, atol, Eigen::Vector4d& jacobian, C_escape = 0)`
 
-`h = d_min - C`. If `d_min < C`, `h += (C - d_min)/C · T_r · v_r`, so that
-inside the margin a receding robot raises `h` and can escape. `jacobian` is
-`∂h/∂psi`.
+`h = d_min - C`. If `d_min < C`, `h += (C - d_min)/C_e · T_r · v_r`, with
+`C_e = C_escape` (or `C` if it is 0), so that inside the margin a receding
+robot raises `h` and can escape. The term starts at `d_min = C`; `C_e` only
+sets its slope. Inside the margin `∂h/∂d_min = 1 - T_r v_r / C_e`, negative
+for `v_r > C_e / T_r`. `jacobian` is `∂h/∂psi`.
 
-### `BarrierTerms barrierTerms(p_r, v_r, p_o, v_o, a_o, T_r, a_s, C, radius = 0, atol = 1e-12)`
+### `BarrierTerms barrierTerms(p_r, v_r, p_o, v_o, a_o, T_r, a_s, C, radius = 0, atol = 1e-12, bounds = {}, C_escape = 0)`
 
-Returns `h`, `lie_f`, `lie_g`, `h_chi`, `d`, `v_r`, `v_o` and `a_o`.
+Returns `h`, `lie_f`, `lie_g`, `grad_p`, `h_chi`, `dh_dpsi`, `d`, `v_r`,
+`v_o`, `a_o`, `psi_bound` and `rate_bound`.
 
 - **Spheres.** `radius` is the sum of the radii (plus `delta_H` for the
   worst-case distance): `d = |p_r - p_o| - radius`, negative if the spheres
@@ -675,8 +702,17 @@ Returns `h`, `lie_f`, `lie_g`, `h_chi`, `d`, `v_r`, `v_o` and `a_o`.
   acceleration.
 - **`h_chi`.** `h_chi = ∂h/∂d`: it is 1 outside the margin and larger inside.
 - **Coincident centers.** If `|p_r - p_o| <= atol`, `u` is the x axis.
+- **Perception bounds.** `bounds` (`PerceptionBounds{p, v, a}`) are
+  half-widths on the obstacle position, velocity and acceleration. They map
+  to `psi_bound = (b_p, b_p|P v_r|/D, b_v + b_p|P v_o|/D, b_a + b_p|P a_o|/D)`,
+  with `P = I - u uᵀ` and `D = |p_r - p_o|`: the position error also
+  rotates `u`. All the outputs are at the corner
+  `(d - b_0, v_r - b_1, v_o + b_2, a_o + b_3)`, which is the minimum of
+  `d_min` over the box. It is also the minimum of `h` unless
+  `v_r > C_e / T_r` there. `rate_bound` bounds the error of `dh/dt` when
+  the true state is elsewhere in the box.
 
-### `BarrierTerms capsuleBarrierTerms(p_r, v_r, p_o, half_axis, v_o, a_o, T_r, a_s, C, radius = 0, atol = 1e-12)`
+### `BarrierTerms capsuleBarrierTerms(p_r, v_r, p_o, half_axis, v_o, a_o, T_r, a_s, C, radius = 0, atol = 1e-12, bounds = {}, C_escape = 0)`
 
 As `barrierTerms()`, for an obstacle capsule: a cylinder with hemispherical
 ends around the segment from `p_o - half_axis` to `p_o + half_axis`, which
@@ -695,7 +731,7 @@ point `c` of the axis closest to `p_r`, `d = |p_r - c| - radius`.
 
 ### `double perceptionMargin(beta, sigma_p, sigma_v, sigma_a, T_f_bar)`
 
-`delta_H = beta (sigma_p + sigma_v T_f_bar + sigma_a T_f_bar²/2)` (Eq. 9).
+`delta_H = beta (sigma_p + sigma_v T_f_bar + sigma_a T_f_bar²/2)` (Eq. 28).
 It is the distance error accumulated over the stopping time `T_f_bar` by
 noisy position, velocity and acceleration estimates. `beta = 3.291` gives
 99.9% confidence for Gaussian noise. Pass the result as
@@ -767,6 +803,12 @@ The kernels in `cbf.h` reproduce its values to 1e-12. The differences are:
 
   With `delta_H = 0` all three forms coincide. The deadlock and its fix are
   described in [robust_margin_deadlock.md](robust_margin_deadlock.md).
+
+  The perception bounds (`obstacle_sigma`) extend the same idea to the
+  velocity and acceleration: the barrier is evaluated at the worst corner of
+  the box around the measured state, with the sensitivities at the actual
+  time of the minimum distance instead of `T_f_bar`
+  ([worst_case_h_design.md](worst_case_h_design.md)).
 - **Obstacles, not only people, and spheres, not only points.** The paper
   monitors points of a person with one margin `C`. `ThorQP` takes any obstacle
   spheres, with a radius per robot frame and per obstacle and a `delta_H` per

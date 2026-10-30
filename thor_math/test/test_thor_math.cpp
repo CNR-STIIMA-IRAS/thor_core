@@ -421,6 +421,13 @@ TEST_F(ThorQpIntegrationTest, CbfUsesSphereRadiiAndPerObstacleDeltaH)
   wrong = in;
   wrong.obstacle_delta_H = {0.1, -0.01};
   EXPECT_THROW(qp.solve(wrong), std::invalid_argument);
+  // Perception standard deviations: one per obstacle point, not negative.
+  wrong = in;
+  wrong.obstacle_sigma = {Eigen::Vector3d::Zero()};
+  EXPECT_THROW(qp.solve(wrong), std::invalid_argument);
+  wrong = in;
+  wrong.obstacle_sigma = {Eigen::Vector3d::Zero(), Eigen::Vector3d(0.0, -0.1, 0.0)};
+  EXPECT_THROW(qp.solve(wrong), std::invalid_argument);
   // Capsule axes: one per obstacle point, finite.
   wrong = in;
   wrong.obstacle_axis = {Eigen::Vector3d::Zero()};
@@ -488,6 +495,129 @@ TEST_F(ThorQpIntegrationTest, RobotAtRestInsideTheRobustBandCanMoveAway)
     ASSERT_NO_THROW(out = qp.solve(in));
     EXPECT_NEAR(out.cbf.h_now, -0.002, 1e-9);
     EXPECT_NEAR(out.cbf.distance, config.C + config.delta_H - 0.002, 1e-9);
+
+    // The commanded acceleration moves the tool away from the obstacle.
+    Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian =
+      Eigen::Matrix<double, 6, Eigen::Dynamic>::Zero(6, model_.nv);
+    pinocchio::computeJointJacobians(model_, data, state.head(axes));
+    pinocchio::getFrameJacobian(model_, data, frame, pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
+    EXPECT_LT(direction.dot(jacobian.topRows<3>() * out.next_acc), 0.0);
+  }
+}
+
+// Perception bounds (docs/worst_case_h_design.md). With the robot at rest and
+// a static obstacle only the position bound acts, and only on the distance:
+// it is the same as delta_H = sigma_bound * sigma_p.
+TEST_F(ThorQpIntegrationTest, PositionSigmaOnAStaticSceneIsDeltaH)
+{
+  const auto axes = static_cast<unsigned int>(model_.nv);
+  ThorConfig config = baseConfig(4, 0.1, 0.002, true);
+  config.C = 0.05;
+  config.qmax = constant(2.0 * kPi);
+  config.qmin = constant(-2.0 * kPi);
+  config.Dqmax = constant(3.0);
+  config.DDqmax = constant(50.0);
+  config.lambda_acc = 1e-6;
+  config.lambda_scaling = 1.0;
+  config.lambda_clik = 1e+2;
+  config.cbf = true;
+  const auto frame = static_cast<unsigned int>(model_.getFrameId("tool0"));
+  config.cbf_frame_ids = {frame};
+  config.n_obstacle_points = 1;
+
+  Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
+  state.head(axes) << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0;
+  pinocchio::Data data(model_);
+  pinocchio::framesForwardKinematics(model_, data, state.head(axes));
+  const Eigen::Vector3d tool = data.oMf[frame].translation();
+
+  ThorInput in;
+  in.target_dq = Eigen::VectorXd::Zero(axes * config.n_intervals);
+  in.next_target_q = state.head(axes);
+  in.x0 = state;
+  // Inside the robust band (h < 0): the CBF row is active and the robot moves.
+  in.obstacle_pos = {tool + Eigen::Vector3d(0.06, 0.02, 0.0)};
+  in.obstacle_vel = {Eigen::Vector3d::Zero()};
+  const double measured = (in.obstacle_pos[0] - tool).norm();
+  const double sigma_p = 0.01;
+
+  for (const CbfFormulation formulation : {CbfFormulation::discrete, CbfFormulation::continuous}) {
+    SCOPED_TRACE(formulation == CbfFormulation::discrete ? "discrete" : "continuous");
+    config.cbf_formulation = formulation;
+
+    ThorConfig with_delta = config;
+    with_delta.delta_H = config.sigma_bound * sigma_p;
+    ThorQP qp_delta(with_delta, model_);
+    qp_delta.setInitialState(state);
+    const ThorOutput out_delta = qp_delta.solve(in);
+
+    ThorConfig with_sigma = config;
+    with_sigma.obstacle_sigma = Eigen::Vector3d(sigma_p, 0.0, 0.0);
+    with_sigma.cbf_robust_rate = true;  // no rotation terms at rest: no effect
+    ThorQP qp_sigma(with_sigma, model_);
+    qp_sigma.setInitialState(state);
+    const ThorOutput out_sigma = qp_sigma.solve(in);
+
+    EXPECT_TRUE(out_sigma.next_acc.isApprox(out_delta.next_acc, 1e-9))
+      << out_sigma.next_acc.transpose() << " vs " << out_delta.next_acc.transpose();
+    EXPECT_GT(out_sigma.next_acc.norm(), 1e-3);
+    EXPECT_NEAR(out_sigma.cbf.h_now, out_delta.cbf.h_now, 1e-12);
+    EXPECT_NEAR(out_sigma.cbf.h_now, measured - config.sigma_bound * sigma_p - config.C, 1e-9);
+    // The diagnostics report the measured distance in both cases.
+    EXPECT_NEAR(out_sigma.cbf.distance, measured, 1e-9);
+    EXPECT_NEAR(out_delta.cbf.distance, measured, 1e-9);
+  }
+}
+
+// Regression of the deadlock of the first-order robust term with the bounds
+// on every component: a robot at rest inside the robust band of an obstacle
+// whose velocity and acceleration are uncertain must be able to move away.
+// The corner moves the boundary of the safe set and the escape term together.
+TEST_F(ThorQpIntegrationTest, RobotAtRestNextToAnUncertainObstacleCanMoveAway)
+{
+  const auto axes = static_cast<unsigned int>(model_.nv);
+  ThorConfig config = baseConfig(1, 0.002, 0.002, false);
+  config.C = 0.05;
+  config.C_escape = 0.2;
+  config.obstacle_sigma = Eigen::Vector3d(0.02, 0.05, 0.3);
+  config.cbf_robust_rate = true;
+  config.qmax = constant(2.0 * kPi);
+  config.qmin = constant(-2.0 * kPi);
+  config.Dqmax = constant(3.0);
+  config.DDqmax = constant(50.0);
+  config.lambda_acc = 1e-6;
+  config.lambda_scaling = 1.0;
+  config.lambda_clik = 1e+2;
+  config.cbf = true;
+  const auto frame = static_cast<unsigned int>(model_.getFrameId("tool0"));
+  config.cbf_frame_ids = {frame};
+  config.n_obstacle_points = 1;
+
+  for (const CbfFormulation formulation : {CbfFormulation::discrete, CbfFormulation::continuous}) {
+    SCOPED_TRACE(formulation == CbfFormulation::discrete ? "discrete" : "continuous");
+    config.cbf_formulation = formulation;
+    ThorQP qp(config, model_);
+
+    Eigen::VectorXd state = Eigen::VectorXd::Zero(2 * axes);
+    state.head(axes) << 0.0, -kPi / 2.0, kPi / 2.0, -kPi / 2.0, -kPi / 2.0, 0.0;
+    qp.setInitialState(state);
+
+    pinocchio::Data data(model_);
+    pinocchio::framesForwardKinematics(model_, data, state.head(axes));
+    const Eigen::Vector3d tool = data.oMf[frame].translation();
+    const Eigen::Vector3d direction = Eigen::Vector3d::UnitX();
+
+    ThorInput in;
+    in.target_dq = Eigen::VectorXd::Zero(axes);
+    in.next_target_q = state.head(axes);
+    in.x0 = state;
+    // Measured at rest, just outside C + 3 sigma_p: the worst case approaches.
+    in.obstacle_pos = {tool + direction * (config.C + 3.0 * config.obstacle_sigma(0) + 0.01)};
+    in.obstacle_vel = {Eigen::Vector3d::Zero()};
+
+    ThorOutput out;
+    ASSERT_NO_THROW(out = qp.solve(in));
+    EXPECT_LT(out.cbf.h_now, 0.0);
 
     // The commanded acceleration moves the tool away from the obstacle.
     Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian =
@@ -1031,6 +1161,17 @@ TEST_F(ThorQpIntegrationTest, CbfConfigurationRequiresMatchingModel)
   EXPECT_NO_THROW(ThorQP(config, model_));
   config.delta_H = -0.01;
   EXPECT_THROW(ThorQP(config, model_), std::invalid_argument);
+  config.delta_H = 0.0;
+  config.C_escape = -0.1;
+  EXPECT_THROW(ThorQP(config, model_), std::invalid_argument);
+  config.C_escape = 0.0;
+  config.sigma_bound = -1.0;
+  EXPECT_THROW(ThorQP(config, model_), std::invalid_argument);
+  config.sigma_bound = 3.0;
+  config.obstacle_sigma = Eigen::Vector3d(0.02, -0.1, 0.3);
+  EXPECT_THROW(ThorQP(config, model_), std::invalid_argument);
+  config.obstacle_sigma = Eigen::Vector3d(0.02, 0.1, 0.3);
+  EXPECT_NO_THROW(ThorQP(config, model_));
 }
 
 // ---------------------------------------------------------------------------
