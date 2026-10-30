@@ -246,14 +246,119 @@ valutazione del rischio.
      scatola;
    - `σ_ψ` propagata confrontata con un Monte Carlo sullo stato.
 
-## 11. Punti aperti
+## 11. Punti aperti: analisi e proposte
 
-- Come calcolare `∇_ψ ḣ` del §8: per via analitica (servono derivate seconde
-  di `d_min`) oppure con una costante di Lipschitz conservativa.
-- Se trattare `v_r∥` e il cambio di segno del termine di escape con l'angolo
-  in `ψ̂` o valutando due angoli (§5).
-- Il valore di `C` dopo la modifica: va rifatto con la valutazione del rischio.
-- L'articolo non è coerente sui numeri. La Fig. 5b riporta `C₀ = 0.1 m` e
-  `C + Δ_H = 0.25 m`. La Tabella III dà `C₀ = 0.06 m`, e l'eq. (28) dà
-  `C ≈ 0.25 m` senza un `Δ_H` separato. Il commento di `perceptionMargin()`
-  cita ancora l'"Eq. 9" di una versione precedente.
+Le stime numeriche di questa sezione sono ordini di grandezza, calcolati con i
+valori delle Tabelle II e III dell'articolo: `γ = 9.65`, `T_r = 0.15 s`,
+`C = 0.25 m`, `σ_p = 0.02 m`, `σ_v = 0.085 m/s`, `σ_a = 0.39 m/s²`.
+
+### 11.1 Il termine su `ḣ` (§8) non è trascurabile
+
+Confronto dei due termini robusti, entrambi in m/s:
+
+| Termine | Stima | Origine |
+|---|---|---|
+| su `h`: `γ · 3 \|∇_ψ h\|ᵀ σ_ψ` | ≈ 9.65 × 0.19 ≈ 1.8 m/s | la parte di `C` che oggi viene dall'eq. (28) |
+| su `ḣ`, da `σ_v` | ≈ 3 × 0.085 ≈ 0.25 m/s | `ḋ = v_r∥ − v_h∥`, quindi `∂ḣ/∂v_h∥ ≈ −1` |
+| su `ḣ`, da `σ_a` | ≈ 0.3 × 1.2 ≈ 0.35 m/s | `≈ τ_min · 3σ_a` |
+
+Il termine su `ḣ` vale circa un terzo di quello su `h`: ignorarlo non è una
+scelta neutra.
+
+**Il problema.** `ḣ = L_f h + L_g h · a_r`, quindi `∇_ψ ḣ` contiene anche
+`∂(L_g h)/∂ψ · a_r`. Il termine robusto diventa
+
+```
+Σ_i | ∂L_f h/∂ψ_i + ∂L_g h/∂ψ_i · a_r | · 3σ_ψi
+```
+
+e dipende dal controllo. Ci sono tre modi di trattarlo:
+
+| Opzione | Pro | Contro |
+|---|---|---|
+| Forma di Cosner `a + b‖u‖`, con `‖a_r‖ ≤ a_max` | resta lineare | conservativa |
+| Variabili ausiliarie `t_i ≥ ±(...)` | esatta e convessa | 4 variabili e 8 righe per coppia: con 126 coppie troppe per i 2 ms |
+| `a_r` congelato alla soluzione del ciclo precedente | lineare, zero righe in più | approssimazione al primo ordine nel tempo |
+
+**Proposta:** `a_r` congelato al ciclo precedente. È coerente con il resto di
+`ThorQP`, che è già sequenziale e usa la predizione del ciclo prima per gli
+intervalli futuri.
+
+**Calcolo delle derivate:** differenze finite su `ψ`, con 8 valutazioni in
+forma chiusa di `barrierTerms()` per coppia, a costo trascurabile. Le derivate
+seconde analitiche di `d_min`, definita a tratti, sono fragili e non ne vale la
+pena.
+
+### 11.2 `v_r∥` e il segno del termine di escape (§5)
+
+**`v_r∥` non ha incertezza trascurabile.** Vicino all'umano
+`σ_vr∥ = σ_p |P v_r| / d` (§6). Con `d = 0.3 m` e `|P v_r| = 1 m/s` si ha
+`3σ_vr∥ ≈ 0.2 m/s`.
+
+**Proposta:** lungo `v_r∥` valutare entrambi gli angoli della scatola e tenere
+il minimo. Costa 2 valutazioni. La `h_rob` risultante è il minimo di due
+funzioni lisce, ma la barriera è già definita a tratti, quindi non cambia nulla
+di sostanziale.
+
+**Il cambio di segno dell'escape dipende da `C`.** Il termine di escape cambia
+segno per `v_r∥ > C / T_r`:
+
+- con `C = 0.25 m` (oggi) la soglia è 1.67 m/s, lontana dalle velocità tipiche;
+- se `C` scende verso `C₀ = 0.06 m` (§9), la soglia diventa **0.4 m/s**, una
+  velocità normale.
+
+Anche la pendenza dell'escape, `(C − d_min)/C · T_r`, diventa molto più
+ripida. Ridurre `C` cambia quindi il comportamento dell'escape, non solo il
+margine.
+
+**Proposta:** separare il parametro dell'escape da `C`, ad esempio con un
+`C_esc` fisso oppure `C + Δ`, così margine ed escape si tarano in modo
+indipendente.
+
+### 11.3 Il valore di `C` (§9): errore di misura ed errore di modello
+
+L'eq. (28) mescola due errori di natura diversa:
+
+- **errore di misura**: `σ_p`, `σ_v` e `σ_a` dei sensori. Con questa proposta
+  entra in `ψ_worst`;
+- **errore di modello**: l'accelerazione dell'umano non è costante
+  sull'orizzonte. Il testo dell'articolo dice che `C` assorbe il jerk non
+  modellato, ma nell'eq. (28) non c'è un termine di jerk.
+
+Il jerk non si può coprire nel caso peggiore. Con jerk tra 100 e 1000 m/s³
+[19] e `T_f = 0.3 s`, `j T³ / 6` vale tra 0.45 e 4.5 m. Va trattato in modo
+statistico.
+
+**Proposta:** calibrare l'errore di modello sui dati registrati. Per ogni
+istante del dataset umano:
+
+1. predire `d(τ)` con il modello ad accelerazione costante, eq. (6b)/(7c);
+2. confrontarla con la distanza vera registrata, per `τ ∈ [0, T̄_f]`;
+3. prendere il quantile al 99.7% dell'errore come `C_modello`.
+
+`C` diventa la somma di termini con un'origine dichiarata, utile anche per la
+valutazione del rischio:
+
+```
+C = C₀ + C_modello + Δd_miss        (Δd_miss dall'eq. (23)–(24))
+```
+
+### 11.4 Incongruenze dell'articolo
+
+Va deciso quale numero è quello vero:
+
+- negli esperimenti `C₀` valeva 0.06 m (Tabella III) o 0.1 m (Fig. 5b)?
+- "`C + Δ_H = 0.25 m`" nella Fig. 5b vuol dire che `Δ_H` era separato da `C`,
+  o è un'etichetta rimasta da una versione precedente? Con l'eq. (28) si ha
+  `C ≈ 0.25 m` già senza `Δ_H`.
+
+Il commento di `perceptionMargin()` cita ancora l'"Eq. 9" di una versione
+precedente dell'articolo: va aggiornato all'eq. (28).
+
+### 11.5 Decisioni in sospeso
+
+- [ ] Termine su `ḣ` con `a_r` congelato al ciclo precedente (§11.1).
+- [ ] Separare il parametro dell'escape da `C` (§11.2).
+- [ ] Script di calibrazione di `C_modello` sul dataset umano registrato
+      (§11.3); serve la posizione del dataset.
+- [ ] Valori di `C₀` e `Δ_H` usati negli esperimenti (§11.4).
