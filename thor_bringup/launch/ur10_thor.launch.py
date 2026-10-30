@@ -10,6 +10,7 @@
 Arguments:
   rviz:=true|false     start RViz
   demo:=true|false     start the simulated person, the robot goals and the markers
+  plot:=false|true     start PlotJuggler on the controller state (config/thor_demo.xml)
   chained:=false|true  false: ThorTrajectoryController (config/ur10_controllers.yaml);
                        true: joint_trajectory_controller chained to ThorChainableController
                        (config/ur10_controllers_chained.yaml)
@@ -31,6 +32,7 @@ from launch_ros.substitutions import FindPackageShare
 def launch_setup(context):
     rviz = LaunchConfiguration('rviz')
     demo = LaunchConfiguration('demo')
+    plot = LaunchConfiguration('plot')
     chained = LaunchConfiguration('chained').perform(context).lower() == 'true'
     share = FindPackageShare('thor_bringup')
     controllers = PathJoinSubstitution(
@@ -67,7 +69,9 @@ def launch_setup(context):
         Node(package='rviz2', executable='rviz2', condition=IfCondition(rviz),
              arguments=['-d', PathJoinSubstitution([share, 'rviz', 'thor_demo.rviz'])],
              additional_env={'QT_QPA_PLATFORM': 'xcb'}),
-
+        Node(package='plotjuggler', executable='plotjuggler', condition=IfCondition(plot),
+             arguments=['--nosplash', '--layout', PathJoinSubstitution([share, 'config', 'thor_demo.xml'])],
+             additional_env={'QT_QPA_PLATFORM': 'xcb'}),
     ]
 
 
@@ -76,6 +80,8 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='true', description='Start RViz'),
         DeclareLaunchArgument('demo', default_value='true',
                               description='Start the simulated person and the robot goals'),
+        DeclareLaunchArgument('plot', default_value='false',
+                              description='Start PlotJuggler on the controller state'),
         DeclareLaunchArgument('chained', default_value='false',
                               description='joint_trajectory_controller chained to ThorChainableController'),
         OpaqueFunction(function=launch_setup),

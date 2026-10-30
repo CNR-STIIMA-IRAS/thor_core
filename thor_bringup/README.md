@@ -27,7 +27,9 @@ Walk the person into the path of the arm: the robot moves around the person
 or slows down, and resumes the trajectory when the person leaves.
 
 Arguments: `rviz:=false`, `demo:=false` (only robot and controllers),
-`chained:=true`.
+`chained:=true`, `plot:=true` (PlotJuggler with `config/thor_demo.xml`: barrier,
+projected velocities, separation distance with the thresholds, scaling, status
+and solve time from `/thor_controller/thor_state`).
 
 | Node | Role |
 | --- | --- |
