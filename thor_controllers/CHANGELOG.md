@@ -26,6 +26,8 @@ project uses [Semantic Versioning](https://semver.org/).
   and the fields `sigma_position`, `sigma_velocity` and `sigma_acceleration`
   of `thor_msgs/Obstacle` (negative: the default of the controller, component
   by component). `Obstacle::sigma` in `ThorCore`.
+- Build: `Release` is the default when no build type is given; a build without
+  optimizations made the controller overrun its period by ~10 cycles.
 - `thor.cbf.escape_margin`: scale of the escape term of the barrier
   (`ThorConfig::C_escape`); 0 means `thor.cbf.safety_margin`.
 - Parameters under `thor.*`, generated with `generate_parameter_library`, and

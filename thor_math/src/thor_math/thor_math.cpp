@@ -512,6 +512,29 @@ namespace math
   //       m_ci0.segment(9*m_nc*m_nax+2*m_nc+ic*m_nax,m_nax)= m_tau_max;
   //     }
   //   }
+    /*
+    * TUBE around the nominal path, at every prediction time t_i:
+    *
+    *  q(t_i) - q_ref(t_i) + bound >= 0,   -q(t_i) + q_ref(t_i) + bound >= 0
+    *
+    * with q(t_i) = Pf_i x0 + PF_i u and q_ref(t_i) = next_target_q + W_i s
+    * (nominal velocities integrated with the scalings). The u part is
+    * constant; the s part and the offsets depend on the targets and are
+    * filled in doSolve(). The tube rows come before the CBF rows, which
+    * must stay the last columns.
+    */
+    if (m_tube_bound.size() != 0)
+    {
+      const Eigen::Index n_u = static_cast<Eigen::Index>(m_nc) * m_nax;
+      m_tube_col = m_CI.cols();
+      m_CI.conservativeResize(m_CI.rows(), m_CI.cols() + 2 * n_u);
+      m_ci0.conservativeResize(m_ci0.size() + 2 * n_u);
+      m_CI.rightCols(2 * n_u).setZero();
+      m_ci0.tail(2 * n_u).setZero();
+      m_CI.block(0, m_tube_col, n_u, n_u) = m_position_forced_resp.transpose();
+      m_CI.block(0, m_tube_col + n_u, n_u, n_u) = -m_position_forced_resp.transpose();
+    }
+
     // 1 constraint for each robot sphere, obstacle point and prediction interval
     if (m_use_cbf)
     {
@@ -750,6 +773,8 @@ namespace math
       ci0.segment(2*m_nc*(m_nax+1)+4*m_nax*m_nc,m_nax*m_nc).noalias()+=m_invariance_free_resp*x0; // invariance lower constraint
       ci0.segment(2*m_nc*(m_nax+1)+5*m_nax*m_nc,m_nax*m_nc).noalias()-=m_invariance_free_resp*x0; // invariance upper constraint
     }
+    if (m_tube_bound.size() != 0)
+      buildTube(in, ci0);
     // if  (m_are_torque_bounds_active)
     // {
     //   for (unsigned int idx=0;idx<m_nc;idx++)
@@ -897,6 +922,45 @@ namespace math
     // std::cout << "Solution computed" << std::endl;
   }
 
+  void ThorQP::buildTube ( const ThorInput& in, Eigen::VectorXd& ci0 )
+  {
+    // Reference at the prediction times, affine in the scalings:
+    //   q_ref(t_i) = r + sum_{j <= i} s_j w_j
+    // with w_0 = target_dq_0 t_0, w_j = (target_dq_{j-1} + target_dq_j)/2 (t_j - t_{j-1}),
+    // and r = next_target_q - sampling_scaling w_0 the reference now (the
+    // targets were sampled with the scaling sampling_scaling).
+    // Row of joint k at node i: q_k(t_i) - q_ref,k(t_i) + bound_k >= 0 (lower)
+    // and its opposite (upper); s_j enters node i for j <= i.
+    const Eigen::Index n_u = static_cast<Eigen::Index>(m_nc) * m_nax;
+    const Eigen::VectorXd& bound = in.tube_bound.size() != 0 ? in.tube_bound : m_tube_bound;
+    const Eigen::VectorXd& x0 = in.x0;
+    for (unsigned int i = 0; i < m_nc; ++i)
+    {
+      for (unsigned int j = 0; j <= i; ++j)
+      {
+        const double dt = j == 0 ? m_prediction_time(0) : m_prediction_time(j) - m_prediction_time(j-1);
+        for (unsigned int k = 0; k < m_nax; ++k)
+        {
+          const double w = j == 0 ? in.target_dq(k) * dt
+                                  : 0.5 * (in.target_dq(m_nax*(j-1) + k) + in.target_dq(m_nax*j + k)) * dt;
+          m_CI(n_u + j, m_tube_col + m_nax*i + k) = -w;
+          m_CI(n_u + j, m_tube_col + n_u + m_nax*i + k) = w;
+        }
+      }
+      // Offsets: Pf_i x0 - r + bound (lower), and -Pf_i x0 + r + bound =
+      // 2 bound - lower (upper).
+      auto lower = ci0.segment(m_tube_col + m_nax*i, m_nax);
+      lower.noalias() = m_position_free_resp.middleRows(m_nax*i, m_nax) * x0;
+      lower += bound - in.next_target_q;
+      lower += (in.sampling_scaling * m_prediction_time(0)) * in.target_dq.head(m_nax);
+      ci0.segment(m_tube_col + n_u + m_nax*i, m_nax) = 2.0 * bound - lower;
+    }
+    // The s coefficients change with the targets: update the minimum of these
+    // rows over the variable bounds (see updateMatrices()).
+    for (Eigen::Index col = m_tube_col; col < m_tube_col + 2 * n_u; ++col)
+      m_ws.ci_min(col) = m_CI.col(col).cwiseMax(0.0).dot(m_lb) + m_CI.col(col).cwiseMin(0.0).dot(m_ub);
+  }
+
   void ThorQP::buildContinuousCbf ( const ThorInput& in, Eigen::VectorXd& ci0, CbfDiagnostics& diag )
   {
     // Continuous-time CBF at the start of every interval. Interval i starts
@@ -914,7 +978,7 @@ namespace math
     // derivatives are at the worst corner of the box around the measured psi
     // (cbf::barrierTerms()); with m_cbf_robust_rate the bound of the error of
     // dh/dt, cbf::BarrierTerms::rate_bound, is also subtracted
-    // (docs/worst_case_h_design.md).
+    // (docs/robust_cbf_method.md).
     // With a single interval, delta_H = 0 and no bounds this is the one-step controller of cbf_python.
     const Eigen::VectorXd& x0 = in.x0;
     const Eigen::Index n_cols = m_CI.cols();
@@ -1155,6 +1219,12 @@ namespace math
       throw std::invalid_argument("Dqmax must be positive and DDqmax non-negative");
     if (!(config.min_scaling <= config.max_scaling))
       throw std::invalid_argument("min_scaling must not exceed max_scaling");
+    if (config.tube_bound.size() != 0)
+    {
+      requireSize(config.tube_bound, nax, "tube_bound");
+      if (!(config.tube_bound.array() > 0.0).all())
+        throw std::invalid_argument("tube_bound must be positive");
+    }
 
     if (config.cbf)
     {
@@ -1204,6 +1274,7 @@ namespace math
     m_DDqmax = config.DDqmax;
     m_tau_max = config.tau_max;
     m_are_position_bounds_active = config.position_bounds;
+    m_tube_bound = config.tube_bound;
     m_min_scaling = config.min_scaling;
     m_max_scaling = config.max_scaling;
 
@@ -1238,6 +1309,16 @@ namespace math
     requireSize(in.target_dq, static_cast<Eigen::Index>(m_nax) * m_nc, "target_dq");
     requireSize(in.next_target_q, m_nax, "next_target_q");
     requireSize(in.x0, 2 * static_cast<Eigen::Index>(m_nax), "x0");
+    if (!std::isfinite(in.sampling_scaling))
+      throw std::invalid_argument("sampling_scaling must be finite");
+    if (in.tube_bound.size() != 0)
+    {
+      if (m_tube_bound.size() == 0)
+        throw std::invalid_argument("ThorInput::tube_bound needs the tube enabled (ThorConfig::tube_bound)");
+      requireSize(in.tube_bound, m_nax, "tube_bound");
+      if (!(in.tube_bound.array() > 0.0).all())
+        throw std::invalid_argument("tube_bound must be positive");
+    }
 
     ThorOutput out;
     if (!m_use_cbf)
@@ -1287,6 +1368,10 @@ namespace math
     }
     for (std::size_t k = 0; k < n_obstacles; ++k)
     {
+      if (!full.obstacle_pos[k].allFinite() || !full.obstacle_vel[k].allFinite() ||
+          !full.obstacle_acc[k].allFinite() || !std::isfinite(full.obstacle_radius[k]) ||
+          !std::isfinite(full.obstacle_delta_H[k]) || !full.obstacle_sigma[k].allFinite())
+        throw std::invalid_argument("obstacle data must be finite");
       if (!(full.obstacle_radius[k] >= 0.0) || !(full.obstacle_delta_H[k] >= 0.0))
         throw std::invalid_argument("obstacle_radius and obstacle_delta_H must not be negative");
       if (!(full.obstacle_sigma[k].array() >= 0.0).all())
@@ -1313,7 +1398,7 @@ namespace math
                                                            const std::vector<Eigen::Vector3d> &v_o_vector,
                                                            const std::vector<Eigen::Vector3d> &p_o_vector )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_o_vector, v_o_vector, {}, {}, {}, {}, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, p_o_vector, v_o_vector, {}, {}, {}, {}, {}, {}, 1.0});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);
@@ -1326,7 +1411,7 @@ namespace math
                                                            Eigen::VectorXd& next_acc,
                                                            double& next_scaling )
   {
-    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}, {}, {}, {}, {}});
+    const ThorOutput out = solve({targetDq, next_targetQ, target_scaling, x0, {}, {}, {}, {}, {}, {}, {}, {}, 1.0});
     next_acc = out.next_acc;
     next_scaling = out.next_scaling;
     return toLegacyDiagnostics(out.cbf);

@@ -75,6 +75,11 @@ source install/setup.bash
 ros2 launch thor_bringup ur10_thor.launch.py
 ```
 
+`thor_math` and `thor_controllers` default to `Release` when no build type is
+given: without optimizations `ThorQP::solve()` is ~150 times slower, and the
+controller overruns its period (tens of ms per cycle instead of ~0.1 ms).
+Pass `-DCMAKE_BUILD_TYPE=Debug` explicitly to debug.
+
 On machines with little memory, limit the parallel jobs (`MAKEFLAGS=-j2`),
 since translation units that include Pinocchio take a few GB each.
 

@@ -122,7 +122,11 @@ class ThorMarkers(Node):
             text.pose.orientation.w = 1.0
             text.scale.z = 0.08
             text.color.r = text.color.g = text.color.b = text.color.a = 1.0
-            status = 'BRAKING' if s.status == ThorControllerState.STATUS_BRAKING else ''
+            status = {
+                ThorControllerState.STATUS_BRAKING: 'BRAKING',
+                ThorControllerState.STATUS_PROTECTIVE_STOP: 'PROTECTIVE STOP',
+                ThorControllerState.STATUS_RECOVERY: 'RECOVERY',
+            }.get(s.status, '')
             barrier = f'h {s.h_now:.2f} m   distance {s.min_distance:.2f} m' if s.n_obstacles else 'no obstacles'
             text.text = f'scaling {s.scaling:.2f}   {barrier}   {status}'
             markers.markers.append(text)

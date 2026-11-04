@@ -131,6 +131,7 @@ controller_interface::return_type ThorTrajectoryController::update(
   readMeasuredState();
   samplePreview(applied_scaling_);
   ros_core_.updateObstacles(time);
+  input_.sampling_scaling = applied_scaling_;  // the targets were sampled with it
   const CoreOutput & out = ros_core_.core().step(input_);
   last_output_ = &out;
   writeCommands(out);

@@ -57,8 +57,11 @@ Per ogni coppia (sfera del robot `j`, ostacolo `k`):
 | `ψ = [d, v_r∥, v_o∥, a_o∥]` | stato mappato, eq. (13) | – |
 | `T_r` | tempo di reazione | s |
 | `a_s` | decelerazione di frenata del robot (> 0) | m/s² |
-| `C` | margine di sicurezza tra le superfici | m |
-| `C_e` | scala del termine di escape (`C_escape`, 0 → `C`) | m |
+| `C` | margine di sicurezza tra le superfici, `C = C₀ + C_modello + Δd_miss` (§6) | m |
+| `C₀` | parte statica di `C`: incertezza non coperta dai σ, ad esempio l'approssimazione del corpo con sfere e capsule | m |
+| `C_modello` | parte di `C` che copre l'errore del modello ad accelerazione costante dell'ostacolo | m |
+| `Δd_miss` | parte di `C` che copre la chiusura dovuta a un ciclo di controllo perso | m |
+| `C_e` | distanza di fuga del termine di escape (`C_escape`, 0 → `C`), §3.3 | m |
 | `γ` | guadagno della funzione di classe K | 1/s |
 | `σ_p, σ_v, σ_a` | deviazioni standard di posizione, velocità e accelerazione dell'ostacolo | m, m/s, m/s² |
 | `k` | numero di deviazioni standard (`sigma_bound`) | – |
@@ -88,7 +91,7 @@ d(τ) = d + (v_r∥ − v_o∥) τ − a_o∥ τ²/2 + a_s (τ − T_r)²/2     
 
 La finestra termina in
 
-```
+```latex
 T_f = T_r − v_r∥ / a_s     se v_r∥ < 0  (il robot si ferma)
 T_f = T_r                  se v_r∥ ≥ 0  (il robot non deve frenare)
 ```
@@ -143,41 +146,167 @@ all'estremo mobile `T_f`, che dipende da `v_r∥`.
 
 ### 3.1 Definizione
 
-```
-h(ψ) = d_min − C                                              se d_min ≥ C
-h(ψ) = d_min − C + (C − d_min) / C_e · T_r · v_r∥              se d_min < C
-```
+Siano
 
-Il safe set è `h ≥ 0`. Dentro il margine (`d_min < C`) il termine di escape
-dà a un robot che si allontana (`v_r∥ > 0`) un `h` più alto, e quindi
-autorità di controllo: `∂h/∂v_r∥` contiene `(C − d_min) T_r / C_e > 0`. Senza
-questo termine, un robot fermo con `d_min = d` avrebbe `∂h/∂v_r∥ = 0`, cioè
-`L_g h = 0`: non potrebbe agire sulla barriera.
+$$
+\Delta_s(\psi) = d_{\min}(\psi) - C,
+\qquad
+H(x) =
+\begin{cases}
+1 & x > 0\\
+0 & x \le 0
+\end{cases}
+$$
+
+lo scarto dal margine e la funzione di Heaviside. La barriera è
+
+$$
+h(\psi) = \Delta_s \left( 1 - H(-\Delta_s)\,\frac{T_r\, v_{r\parallel}}{C_e} \right)
+=
+\begin{cases}
+\Delta_s & \Delta_s \ge 0 \quad \text{(fuori dal margine)}\\[4pt]
+\Delta_s \left( 1 - \dfrac{T_r\, v_{r\parallel}}{C_e} \right) & \Delta_s < 0 \quad \text{(dentro il margine)}
+\end{cases}
+$$
+
+e il safe set è $\mathcal{S} = \{\psi : h(\psi) \ge 0\}$. In $\Delta_s = 0$ il
+fattore $\Delta_s$ annulla il prodotto, quindi la convenzione su $H(0)$ non
+cambia $h$. 
+
+Il termine di escape serve a dare autorità di controllo dentro il margine.
+Senza di esso, per un robot fermo con $d_{\min} = d$ si avrebbe
+$\partial h / \partial v_{r\parallel} = 0$, cioè $L_g h = 0$: il robot non
+potrebbe agire sulla barriera.
 
 ### 3.2 Proprietà
 
-- **Continuità.** Il termine si annulla in `d_min = C`, quindi `h` è continua.
-  Il bordo del safe set `h = 0` coincide con `d_min = C` e l'escape è attivo
-  proprio lì. È questa la proprietà che evita il deadlock
-  ([robust_margin_deadlock.md](robust_margin_deadlock.md)).
-- **Pendenza in `d_min`.** Dentro il margine
+**Continuità.** $h$ è continua, perché entrambi i rami valgono $0$ in
+$\Delta_s = 0$. Non è differenziabile in $\Delta_s = 0$ quando
+$v_{r\parallel} \neq 0$: la derivata in $d_{\min}$ vale $1$ da destra e
+$1 - T_r v_{r\parallel}/C_e$ da sinistra. Il codice usa il ramo esterno in
+$\Delta_s = 0$, cioè la derivata destra.
 
-  ```
-  ∂h/∂d_min = 1 − T_r v_r∥ / C_e
-  ```
+**Derivate.** Per $\Delta_s \neq 0$:
 
-  che è negativa per `v_r∥ > C_e / T_r`. In quel regime una `d_min` più
-  piccola dà una `h` più grande: è un artefatto del termine di escape.
-- **Ruolo di `C_e`.** `C_e` cambia solo la pendenza, non il punto di
-  attivazione. Con `C_e = C` (il default) la soglia è `C / T_r`: 1.67 m/s con
-  `C = 0.25 m`, ma 0.4 m/s con `C = 0.06 m`. Separare `C_e` da `C` permette di
-  ridurre il margine senza portare la soglia alle velocità tipiche.
+$$
+\frac{\partial h}{\partial d_{\min}} = 1 - H(-\Delta_s)\,\frac{T_r\, v_{r\parallel}}{C_e},
+\qquad
+\left.\frac{\partial h}{\partial v_{r\parallel}}\right|_{d_{\min}} = -H(-\Delta_s)\,\frac{T_r\,\Delta_s}{C_e} \;\ge\; 0
+$$
+
+e il gradiente rispetto a ψ è
+
+$$
+\nabla_\psi h = \frac{\partial h}{\partial d_{\min}}\,\nabla_\psi d_{\min}
++ \left.\frac{\partial h}{\partial v_{r\parallel}}\right|_{d_{\min}} e_2,
+$$
+
+con $\nabla_\psi d_{\min}$ dal §2.3 ed $e_2$ il versore della componente
+$v_{r\parallel}$. Dentro il margine $\partial h/\partial d_{\min} < 0$ per
+$v_{r\parallel} > C_e/T_r$: in quel regime una $d_{\min}$ più piccola dà una
+$h$ più grande. È un artefatto del termine di escape.
+
+**Safe set.** $\psi \in \mathcal{S}$ se e solo se $\Delta_s \ge 0$ oppure
+$T_r v_{r\parallel} \ge C_e$.
+
+*Dimostrazione.* Se $\Delta_s \ge 0$, $h = \Delta_s \ge 0$. Se $\Delta_s < 0$,
+$h = \Delta_s (1 - T_r v_{r\parallel}/C_e)$ è non negativa se e solo se
+$1 - T_r v_{r\parallel}/C_e \le 0$. ∎
+
+Il bordo $\partial\mathcal{S} = \{h = 0\}$ è quindi l'unione di due insiemi:
+$\{\Delta_s = 0\}$, dove il termine di escape si attiva, e
+$\{\Delta_s < 0,\ T_r v_{r\parallel} = C_e\}$, cioè gli stati dentro il margine
+che si allontanano esattamente alla velocità di fuga. Appena dentro il
+margine, $\partial h/\partial v_{r\parallel}|_{d_{\min}} = (C - d_{\min})\,T_r/C_e > 0$:
+un robot entrato nel margine ha sempre autorità di controllo per uscirne
+(Osservazione del §3.3). Questa proprietà evita il deadlock
+([robust_margin_deadlock.md](robust_margin_deadlock.md)).
+
+### 3.3 Significato di `C_e`
+
+Siano
+
+$$
+v_e = \frac{C_e}{T_r},
+\qquad
+\varepsilon = \frac{T_r\, v_{r\parallel}}{C_e} = \frac{v_{r\parallel}}{v_e}
+$$
+
+la **velocità di fuga** e la velocità di allontanamento normalizzata. Dentro il
+margine
+
+$$
+h = -\underbrace{(C - d_{\min})}_{\text{penetrazione} \,>\, 0}\,(1 - \varepsilon),
+\qquad
+\frac{\partial h}{\partial d_{\min}} = 1 - \varepsilon .
+$$
+
+$T_r v_{r\parallel}$ è la distanza di cui il robot si allontana durante il tempo
+di reazione, se mantiene la velocità attuale. $C_e$ è quindi una **distanza di
+fuga**: dentro il margine la barriera confronta questa distanza con $C_e$. Ne
+seguono tre regimi:
+
+| Regime | Robot | $h$ dentro il margine | $\partial h / \partial d_{\min}$ |
+|---|---|---|---|
+| $\varepsilon < 1$ | si avvicina, è fermo o si allontana più lento di $v_e$ | $< 0$: stato non sicuro | $> 0$: $h$ cresce allontanandosi |
+| $\varepsilon = 1$ | si allontana a $v_e$ | $= 0$: sul bordo di $\mathcal{S}$ | $= 0$ |
+| $\varepsilon > 1$ | si allontana più veloce di $v_e$ | $> 0$: stato sicuro | $< 0$: artefatto del §3.2 |
+
+Il regime $\varepsilon \le 1$ è anche quello in cui vale la parte (2) della
+Proposizione 1 (§5.4).
+
+$C_e$ cambia solo la pendenza del termine, non il punto in cui si attiva, che
+resta $\Delta_s = 0$. Con $C_e = C$ (il default) si ha $v_e = C/T_r$. Con
+$T_r = 0.15\ \text{s}$ vale $1.67\ \text{m/s}$ per $C = 0.25\ \text{m}$, ma solo
+$0.4\ \text{m/s}$ per $C = 0.06\ \text{m}$. Separare $C_e$ da $C$ permette di
+ridurre il margine senza portare $v_e$ alle velocità di lavoro.
+
+**Osservazione (accelerazione minima di fuga).** Siano robot e ostacolo fermi
+($v_r = v_o = a_o = 0$), con $T_r > 0$ e $d < C$. Allora la condizione continua
+del §4.2 vale se e solo se
+
+$$
+u \cdot a_r \;\ge\; \gamma\,\frac{C_e}{T_r}.
+$$
+
+*Dimostrazione.* Con tutto fermo $d(\tau) = d$ sulla finestra $[0, T_r]$,
+quindi $d_{\min} = d$ e $\Delta_s = d - C < 0$. Il codice prende il minimo in
+$\tau = 0$, dunque $\partial d_{\min}/\partial v_{r\parallel} = 0$ (derivata
+destra; $d_{\min}$ non è differenziabile in $v_{r\parallel} = 0$). Allora
+$h = -(C - d)$ e $L_g h = (C - d)\,(T_r/C_e)\,u$. Tutte le componenti di
+$\dot\psi_f$ del §4.1 sono nulle, quindi $L_f h = 0$. La condizione
+$L_g h \cdot a_r + L_f h + \gamma h \ge 0$ diventa
+
+$$
+(C - d)\,\frac{T_r}{C_e}\,(u \cdot a_r) - \gamma\,(C - d) \ge 0,
+$$
+
+e la tesi segue dividendo per $(C - d)\,T_r/C_e > 0$. ∎
+
+L'accelerazione richiesta non dipende dalla penetrazione e cresce con $C_e$.
+Se supera l'accelerazione cartesiana disponibile lungo $u$, il QP è infeasible
+e il robot resta bloccato nel margine.
+
+**Scelta di $C_e$.** Sia $v_{\text{fuga}}$ la velocità di allontanamento
+tipica da tenere nel regime $\varepsilon \le 1$, e $a_{\text{fuga}}$
+l'accelerazione cartesiana disponibile per allontanarsi. Le due condizioni
+danno
+
+$$
+T_r\, v_{\text{fuga}} \;\le\; C_e \;\le\; \frac{T_r\, a_{\text{fuga}}}{\gamma}.
+$$
+
+Se l'intervallo è vuoto, conta il limite superiore: un robot che non riesce a
+uscire dal margine è peggio di una barriera non monotona a velocità elevate.
 
 ![h in funzione di d_min con due valori di C_escape](figures/fig_escape.svg)
 
-*Figura 2. Barriera per un robot che si allontana a 0.6 m/s con `C = 0.06 m`.
-Con `C_e = C` la pendenza dentro il margine è negativa; con `C_e = 0.25 m` è
-positiva. Fuori dal margine le due curve coincidono.*
+*Figura 2. Barriera per un robot che si allontana a $0.6\ \text{m/s}$ con
+$C = 0.06\ \text{m}$ e $T_r = 0.15\ \text{s}$, cioè
+$T_r v_{r\parallel} = 0.09\ \text{m}$. Con $C_e = C$ si ha $\varepsilon = 1.5$:
+dentro il margine $h > 0$ e la pendenza è negativa. Con $C_e = 0.25\ \text{m}$
+si ha $\varepsilon = 0.36$: $h < 0$ e la pendenza è positiva. Fuori dal
+margine le due curve coincidono.*
 
 ---
 
@@ -239,12 +368,18 @@ I dettagli (linearizzazione, ri-linearizzazioni, costo) sono in
 - **(A1) Errore limitato.** Lo stato vero dell'ostacolo dista da quello
   misurato al più `b_p`, `b_v`, `b_a` in norma euclidea su posizione,
   velocità e accelerazione: `‖p_o − p̂_o‖ ≤ b_p`, e così via. Con errori
-  gaussiani isotropi, `b = k σ` copre la probabilità corrispondente a `k`
-  deviazioni standard per componente.
+  gaussiani isotropi e `b = k σ`, la probabilità che valga il bound in norma
+  è quella di una distribuzione chi a 3 gradi di libertà (circa 97% per
+  `k = 3`), non quella di `k` deviazioni standard per componente (99.7%).
+  Le dimostrazioni usano però solo proiezioni: la componente lungo `u` per
+  `D` e per `Δw·u` (una dimensione, 99.7%) e la componente normale per la
+  rotazione di `u` (due dimensioni, circa 98.9%).
 - **(A2) Robot esatto.** Posizione e velocità del robot sono note (encoder e
   cinematica).
 - **(A3) Errori lentamente variabili.** Nell'intervallo di controllo l'errore
-  di misura è costante.
+  di misura su ψ è costante. Se invece è costante l'errore sullo stato 3D,
+  la `u` vera e quella misurata differiscono fino a `b_p/D` e l'errore su ψ
+  varia con il moto (§8).
 - **(A4) Modello dell'ostacolo.** Accelerazione costante sull'orizzonte di
   arresto; l'errore di questo modello (jerk) non è un errore di misura e va
   in `C` (§6).
@@ -377,8 +512,9 @@ Questa forma, a differenza della linearizzazione
 - **è dimensionalmente coerente:** il termine robusto è dentro `h` e viene
   moltiplicato per `γ` come il resto (in m/s);
 - **non è linearizzata in ψ:** è esatta per il Lemma 2;
-- **non crea deadlock:** il bordo `h_rob = 0` è `d_min(ψ_w) = C`, dove il
-  termine di escape è attivo. La forma linearizzata sposta il bordo dove
+- **non crea deadlock:** il bordo `h_rob = 0` è fatto di `d_min(ψ_w) = C`,
+  dove il termine di escape si attiva, e degli stati che fuggono a `v_e`
+  (§3.2). La forma linearizzata sposta il bordo dove
   `d_min ≥ C`, e lì un robot fermo ha `L_g h = 0`.
 
 La Figura 5 riprende lo schizzo da cui è partita l'idea. Rispetto allo schizzo
@@ -427,8 +563,9 @@ E = ∇_ψ h(ψ_w) · (ψ̇(vero) − ψ̇(ψ_w))
 
 e si scompone così:
 
-- **Ingresso.** `a_r` entra solo in `ψ̇_1` come `u·a_r`, e `u` è lo stesso, quindi
-  la parte di controllo non contribuisce.
+- **Ingresso.** `a_r` entra solo in `ψ̇_1` come `u·a_r`, e con l'errore su ψ
+  costante (A3) `u` è lo stesso, quindi la parte di controllo non
+  contribuisce.
 - **`ψ̇_0 = v_r∥ − v_o∥` e `ψ̇_2 ⊃ a_o∥`.** Dall'angolo, i valori veri
   differiscono di `v_r∥ − v_r∥,w ∈ [0, 2 b_vr]`, `v_o∥ − v_o∥,w ∈ [−2 b_vo, 0]`,
   `a_o∥ − a_o∥,w ∈ [−2 b_ao, 0]`. Il contributo a `E` è
@@ -514,7 +651,7 @@ il 99.7% per componente nel caso gaussiano.
 
 Se `C` si riduce molto, `C_escape` va scelto in modo che `C_escape / T_r`
 superi le velocità di allontanamento tipiche, ad esempio
-`C_escape ≥ T_r · v_max`.
+`C_escape ≥ T_r · v_max`, senza superare `T_r · a_fuga,max / γ` (§3.3).
 
 ---
 
@@ -552,6 +689,10 @@ Con tutti i σ a zero il comportamento è identico a quello senza robustezza.
 | `thor.cbf.sigma_bound` | 3.0 | `sigma_bound` |
 | `thor.cbf.robust_rate` | false | `cbf_robust_rate` |
 
+Anche lo stop protettivo (`thor.protective_stop.distance`) usa la distanza di
+caso peggiore: la distanza misurata meno `distance_error` e meno
+`sigma_bound · σ_p`. Non è parte della CBF.
+
 Nel messaggio `thor_msgs/Obstacle`, i campi `sigma_position`,
 `sigma_velocity` e `sigma_acceleration` danno i σ del singolo ostacolo. Un
 valore negativo (il default, -1) usa la componente corrispondente di
@@ -568,6 +709,8 @@ valore negativo (il default, -1) usa la componente corrispondente di
 | (A3) errori costanti | `ψ̂̇` contiene anche la derivata dell'errore, non coperta da `β` | stimatore filtrato; punto aperto |
 | Bound congelati | nei gradienti e nelle derivate di Lie `b` è trattato come costante, ma dipende da `‖P w‖/D` | effetto del secondo ordine |
 | Rotazione di `u` nei termini di rotazione | non inclusa in `β` | piccola lontano dall'ostacolo |
+| (A3) letta sullo stato 3D invece che su ψ | la `u` vera differisce da `û` fino a `b_p/D`: il termine `(∂h/∂v_r∥)(u − û)·a_r`, del primo ordine e dipendente da `a_r`, non è in `β` | piccolo lontano dall'ostacolo; `C₀` |
+| Distanza tra i centri piccola | nei bound e nei termini di rotazione `D` è limitata inferiormente a 1 mm; con i centri coincidenti `u` è l'asse x (per le capsule, una direzione normale all'asse) | regime già dentro il margine |
 | (A4) accelerazione costante | il jerk non è coperto | `C_modello` calibrato |
 | Capsule | lungo il lato i bound sono applicati ai vettori proiettati sul piano normale all'asse; l'errore sulla posizione lungo l'asse non cambia la regione | – |
 
@@ -601,7 +744,8 @@ Incongruenze trovate confrontando l'articolo con il codice di riferimento
   `− a_s (τ − T_r)` e `− ½ a_s (τ − T_r)²`. Con la convenzione della Tab. I
   (`v_r∥ < 0` = avvicinamento) frenare fa crescere `ḋ`, quindi il segno è `+`,
   come nel codice. Per lo stesso motivo il candidato `τ₂` ha denominatore
-  `a_s − a_h` (§2.2), non `a_h + a_s`, e la condizione di non esistenza è
+  `a_h − a_s` (§2.2; `a_s − a_h` cambiando segno anche al numeratore), non
+  `a_h + a_s`, e la condizione di non esistenza è
   `a_h = a_s`, non `−a_s = a_h`.
 - **Termine robusto.** La versione precedente aggiungeva `+ h_χ δ_H` alla
   condizione: allenta il vincolo e somma m a m/s. Questa versione mette `δ_H`

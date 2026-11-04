@@ -270,6 +270,9 @@ with position, velocity and acceleration. The robot is covered by spheres.
   With `delta_H = 0` all the forms coincide.
 - The CBF columns are written into buffers that are zeroed first, because
   Pinocchio only writes the Jacobian columns of the frame's supporting joints.
+- Build: `Release` is the default when no build type is given. colcon passes
+  none by default, and without optimizations `ThorQP::solve()` is ~150 times
+  slower (16 ms instead of ~0.1 ms on the example scene).
 - Build: no CMP0167 warnings with CMake 3.30 or later. Boost, which Pinocchio
   looks for, is found through the `BoostConfig.cmake` of Boost instead of the
   removed `FindBoost` module.

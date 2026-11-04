@@ -106,15 +106,19 @@ limits are supported.
 ## Topics
 
 - **Obstacles** (`thor.obstacles.topic`, default `~/obstacles`):
-  `thor_msgs/ObstacleArray`, in the root frame of the URDF (or
-  `thor.obstacles.frame_id`); messages in other frames are discarded. Each
+  `thor_msgs/ObstacleArray`, in the root frame of the URDF.
+  `thor.obstacles.frame_id` must be empty or equal to that root frame; transform
+  sensor data before publishing. Messages in other frames are discarded. Each
   obstacle has position, velocity, acceleration, radius, a capsule half axis
   (zero for a sphere), its own distance error and its own standard
   deviations (`sigma_position`, `sigma_velocity`, `sigma_acceleration`;
   negative means `thor.cbf.obstacle_sigma`). When more than
   `thor.cbf.max_obstacles` are given, the closest to the robot are used.
   Without new messages for `thor.obstacles.timeout`, the last obstacles are
-  kept but considered still.
+  kept but considered still. Non-finite obstacle data or a negative radius
+  forces braking and holds trajectory time at zero until valid data arrives,
+  even with CBF and the distance-based protective stop disabled. A timeout
+  preserves this invalid-data stop.
 - **State** (`thor.state_topic`): `thor_msgs/ThorControllerState` every
   cycle: status, scaling, solve time, actual distance from the closest
   obstacle (`min_distance`), barrier (`h_now`), commands and reference.

@@ -256,6 +256,7 @@ controller_interface::return_type ThorChainableController::update_and_write_comm
   Eigen::VectorXd::Map(reference_q_.data(), n) = q_ref_;
 
   ros_core_.updateObstacles(time);
+  input_.sampling_scaling = applied_scaling_;  // the targets were sampled with it
   const CoreOutput & out = ros_core_.core().step(input_);
   last_output_ = &out;
 

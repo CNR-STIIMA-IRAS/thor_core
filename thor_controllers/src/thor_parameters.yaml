@@ -101,6 +101,41 @@ thor_controllers:
         read_only: true
         validation:
           gt<>: [0.0]
+      tube:
+        type: double_array
+        default_value: []
+        description: "Half-width of the tube around the nominal path, one value per joint [rad or m]; empty disables it. The robot slows down along the path instead of deviating more than this; after a stop outside the tube it goes back with a recovery (paper, Method II)."
+        read_only: true
+        validation:
+          lower_element_bounds<>: [0.0]
+
+    protective_stop:
+      enabled:
+        type: bool
+        default_value: true
+        description: "Protective stop (ISO 10218): below distance the robot brakes at the acceleration limits, all the joints together, and holds its position with the motors powered. The MPC is not used while it is active."
+        read_only: true
+      distance:
+        type: double
+        default_value: 0.0
+        description: "Worst-case distance between robot spheres and obstacle surfaces that triggers the stop [m]: measured distance minus distance_error minus sigma_bound * sigma of the position. 0 means cbf.safety_margin."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      resume_margin:
+        type: double
+        default_value: 0.05
+        description: "Hysteresis: the stop ends only above distance + resume_margin [m]."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
+      resume_delay:
+        type: double
+        default_value: 0.5
+        description: "Time with the robot still and the distance restored before resuming automatically [s]."
+        read_only: true
+        validation:
+          gt_eq<>: [0.0]
 
     cbf:
       enabled:
@@ -181,7 +216,7 @@ thor_controllers:
       obstacle_sigma:
         type: double_array
         default_value: [0.0, 0.0, 0.0]
-        description: "Default standard deviations of the obstacle position [m], velocity [m/s] and acceleration [m/s^2], for obstacles that do not give their own. The barrier is evaluated at the worst corner of the box of sigma_bound standard deviations (thor_math/docs/worst_case_h_design.md)."
+        description: "Default standard deviations of the obstacle position [m], velocity [m/s] and acceleration [m/s^2], for obstacles that do not give their own. The barrier is evaluated at the worst corner of the box of sigma_bound standard deviations (thor_math/docs/robust_cbf_method.md)."
         read_only: true
         validation:
           fixed_size<>: [3]
@@ -255,7 +290,7 @@ thor_controllers:
       frame_id:
         type: string
         default_value: ""
-        description: "Frame of the obstacles; empty means the root frame of the robot model. Messages in other frames are discarded."
+        description: "Frame of the obstacles; must be empty or equal to the robot model root frame. Transform sensor data into the root frame before publishing. Messages in other frames are discarded."
         read_only: true
       timeout:
         type: double

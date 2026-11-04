@@ -334,4 +334,37 @@ TEST_F(ThorTrajectoryControllerTest, DiscardsObstaclesInOtherFrames)
   EXPECT_EQ(controller_->last_output_->n_obstacles, 0u);
 }
 
+
+TEST_F(ThorTrajectoryControllerTest, ObstacleFrameMustBeModelRoot)
+{
+  ASSERT_EQ(init({rclcpp::Parameter("thor.obstacles.frame_id", "camera")}),
+            controller_interface::return_type::OK);
+  EXPECT_FALSE(configure_succeeds(controller_));
+  ASSERT_EQ(init({rclcpp::Parameter("thor.obstacles.frame_id", "world")}),
+            controller_interface::return_type::OK);
+  EXPECT_TRUE(configure_succeeds(controller_));
+}
+
+TEST_F(ThorTrajectoryControllerTest, InvalidPerceptionRemainsStoppedAfterTimeout)
+{
+  setUpAndActivate({rclcpp::Parameter("thor.obstacles.timeout", 0.01)});
+  auto pub = controller_->get_node()->create_publisher<thor_msgs::msg::ObstacleArray>(
+    "~/obstacles", rclcpp::SystemDefaultsQoS());
+  thor_msgs::msg::ObstacleArray msg;
+  msg.header.frame_id = "world";
+  msg.obstacles.resize(1);
+  msg.obstacles[0].position.x = 100.0;
+  msg.obstacles[0].velocity.x = std::numeric_limits<double>::quiet_NaN();
+  publishUntilReceived(pub, msg);
+  runFor(0.1);
+  ASSERT_TRUE(controller_->last_output_);
+  EXPECT_TRUE(controller_->ros_core_.obstaclesStale());
+  EXPECT_EQ(controller_->last_output_->status, thor_controllers::CoreOutput::Status::protective_stop);
+  EXPECT_EQ(controller_->last_output_->scaling, 0.0);
+  msg.obstacles.clear();
+  publishUntilReceived(pub, msg);
+  runFor(0.6);
+  EXPECT_EQ(controller_->last_output_->status, thor_controllers::CoreOutput::Status::ok);
+}
+
 }  // namespace

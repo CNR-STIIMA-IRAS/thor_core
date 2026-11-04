@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -36,6 +37,9 @@ namespace
 
 // Far, still obstacle used to fill the unused slots of the MPC.
 constexpr double kFarAway = 100.0;
+
+// Joint speed below which the robot is considered still [rad/s or m/s].
+constexpr double kStillSpeed = 1e-3;
 
 // Distance between the surfaces of a robot sphere and an obstacle.
 double surfaceDistance(const Eigen::Vector3d & center, double radius, const Obstacle & o)
@@ -72,12 +76,25 @@ struct ThorCore::Impl
   Eigen::VectorXd dq;
 
   std::vector<Obstacle> obstacles;
+  bool obstacles_valid = true;
   std::vector<double> obstacle_distance;
   std::vector<std::size_t> obstacle_order;
 
   thor::math::ThorInput in;
   Eigen::VectorXd acc;
   CoreOutput out;
+
+  // Protective stop.
+  double stop_distance = 0.0;
+  bool stop_active = false;
+  double clear_time = 0.0;  // time with the distance restored [s]
+
+  // Tube and its recovery, in model order.
+  bool tube = false;
+  bool recovering = false;
+  Eigen::VectorXd tube_temp;
+  Eigen::VectorXd reference;   // reference now
+  Eigen::VectorXd tube_error;  // |q - reference|
 
   // Copies a vector in joint-name order into model order, and back.
   void toModel(const Eigen::VectorXd & src, Eigen::VectorXd & dst) const
@@ -90,6 +107,8 @@ struct ThorCore::Impl
   }
 
   void selectObstacles();
+  bool superviseStop(double dt, bool still);
+  void brake(double dt);
 };
 
 ThorCore::ThorCore() : impl_(std::make_unique<Impl>()) {}
@@ -186,6 +205,8 @@ void ThorCore::configure(const std::string & urdf, const CoreSettings & settings
   config.DDqmax = permuted(settings.mpc.DDqmax, "the acceleration limit");
   config.qmin = model.lowerPositionLimit;
   config.qmax = model.upperPositionLimit;
+  if (settings.mpc.tube_bound.size() != 0)
+    config.tube_bound = permuted(settings.mpc.tube_bound, "the tube bound");
   if (!(config.Dqmax.array() > 0.0).all())
     throw std::invalid_argument("velocity limits must be positive (check the URDF or thor.limits.velocity)");
   config.n_obstacle_points = config.cbf ? static_cast<int>(settings.max_obstacles) : 0;
@@ -229,6 +250,21 @@ void ThorCore::configure(const std::string & urdf, const CoreSettings & settings
   impl->out.dq = Eigen::VectorXd::Zero(n);
   impl->out.ddq = Eigen::VectorXd::Zero(n);
   impl->out.cbf_frame.reserve(64);
+
+  // Protective stop: needs the robot spheres.
+  const auto & stop = settings.protective_stop;
+  if (!(stop.distance >= 0.0) || !(stop.resume_margin >= 0.0) || !(stop.resume_delay >= 0.0))
+    throw std::invalid_argument("the protective stop distance, resume margin and resume delay must not be negative");
+  impl->stop_distance = stop.distance > 0.0 ? stop.distance : config.C;
+  if (stop.enabled && !settings.spheres.empty() && !(impl->stop_distance > 0.0))
+    throw std::invalid_argument("the protective stop needs a positive distance (or safety margin C)");
+
+  // Tube: the reference now and the temporary bound of the recovery.
+  impl->tube = config.tube_bound.size() != 0;
+  impl->in.tube_bound = impl->tube ? config.tube_bound : Eigen::VectorXd();
+  impl->tube_temp = impl->in.tube_bound;
+  impl->reference = Eigen::VectorXd::Zero(n);
+  impl->tube_error = Eigen::VectorXd::Zero(n);
   impl->configured = true;
   impl_ = std::move(impl);
 }
@@ -247,18 +283,36 @@ void ThorCore::reset(const Eigen::VectorXd & q, const Eigen::VectorXd & dq)
     d.dq.setZero();
   d.in.x0 << d.q, d.dq;
   d.qp.setInitialState(d.in.x0);
+  d.stop_active = false;
+  d.clear_time = 0.0;
+  d.recovering = false;
+  d.tube_temp = d.config.tube_bound;
+  d.in.tube_bound = d.config.tube_bound;
 }
 
 void ThorCore::setObstacles(const std::vector<Obstacle> & obstacles)
 {
   impl_->obstacles.assign(obstacles.begin(), obstacles.end());
+  impl_->obstacles_valid = std::all_of(obstacles.begin(), obstacles.end(), [](const Obstacle & o) {
+    return o.position.allFinite() && o.velocity.allFinite() && o.acceleration.allFinite() &&
+           o.half_axis.allFinite() && std::isfinite(o.radius) && o.radius >= 0.0 &&
+           std::isfinite(o.delta_h) && o.sigma.allFinite();
+  });
 }
 
 void ThorCore::Impl::selectObstacles()
 {
   const std::size_t m = in.obstacle_pos.size();
   out.min_distance = std::numeric_limits<double>::infinity();
-  if (m == 0) return;
+  out.guard_distance = std::numeric_limits<double>::infinity();
+  out.n_obstacles = 0;
+  if (!obstacles_valid)
+  {
+    out.min_distance = out.guard_distance = -std::numeric_limits<double>::infinity();
+    out.n_obstacles = static_cast<unsigned int>(obstacles.size());
+    return;
+  }
+  if (m == 0 && !(settings.protective_stop.enabled && !sphere_frames.empty())) return;
 
   // Distance of each obstacle from the closest robot sphere, at the current state.
   pinocchio::framesForwardKinematics(model, data, q);
@@ -273,6 +327,17 @@ void ThorCore::Impl::selectObstacles()
                                       settings.spheres[s].radius, obstacles[k]));
     }
     obstacle_distance[k] = d;
+    // Worst case over the perception errors, for the protective stop.
+    const Obstacle & o = obstacles[k];
+    const double delta_h = o.delta_h >= 0.0 ? o.delta_h : config.delta_H;
+    const double sigma_p = o.sigma(0) >= 0.0 ? o.sigma(0) : config.obstacle_sigma(0);
+    out.guard_distance = std::min(out.guard_distance, d - delta_h - config.sigma_bound * sigma_p);
+  }
+  if (m == 0)
+  {
+    if (!obstacles.empty()) out.min_distance = *std::min_element(obstacle_distance.begin(), obstacle_distance.end());
+    out.n_obstacles = 0;
+    return;
   }
   std::iota(obstacle_order.begin(), obstacle_order.end(), 0);
   const std::size_t used = std::min(m, obstacles.size());
@@ -310,6 +375,52 @@ void ThorCore::Impl::selectObstacles()
   out.n_obstacles = static_cast<unsigned int>(used);
 }
 
+bool ThorCore::Impl::superviseStop(double dt, bool still)
+{
+  const auto & stop = settings.protective_stop;
+  if (!stop.enabled || sphere_frames.empty())
+  {
+    stop_active = false;
+    return false;
+  }
+  if (out.guard_distance < stop_distance)
+  {
+    stop_active = true;
+    clear_time = 0.0;
+  }
+  else if (stop_active)
+  {
+    // Resume only with the robot still and the distance restored, with
+    // hysteresis, for resume_delay.
+    if (still && out.guard_distance >= stop_distance + stop.resume_margin)
+      clear_time += dt;
+    else
+    {
+      clear_time = 0.0;
+      return true;
+    }
+    if (clear_time >= stop.resume_delay)
+    {
+      stop_active = false;
+      clear_time = 0.0;
+      qp.setInitialState(in.x0);  // the last plan is meaningless after the stop
+    }
+  }
+  return stop_active;
+}
+
+void ThorCore::Impl::brake(double dt)
+{
+  // Every joint at most at its acceleration limit, all stopping together at
+  // the time of the slowest one, so that the robot stops along its current
+  // direction of motion.
+  const double stop_time = dq.cwiseAbs().cwiseQuotient(config.DDqmax).maxCoeff();
+  if (!std::isfinite(stop_time))  // a joint without braking capability
+    acc = (-dq / dt).cwiseMax(-config.DDqmax).cwiseMin(config.DDqmax);
+  else
+    acc = -dq / std::max(stop_time, dt);
+}
+
 const CoreOutput & ThorCore::step(const CoreInput & input)
 {
   auto & d = *impl_;
@@ -333,24 +444,81 @@ const CoreOutput & ThorCore::step(const CoreInput & input)
   }
   d.toModel(input.next_target_q, d.in.next_target_q);
   d.in.target_scaling = input.target_scaling;
+  d.in.sampling_scaling = input.sampling_scaling;
   d.selectObstacles();
 
   auto & out = d.out;
   const auto start = std::chrono::steady_clock::now();
-  try
+  const bool still = n == 0 || d.dq.cwiseAbs().maxCoeff() <= kStillSpeed;
+
+  // Distance from the tube: the reference now is the target of the first
+  // prediction time moved back by the scaling it was sampled with.
+  bool outside_tube = false;
+  out.tube_error = 0.0;
+  if (d.tube)
   {
-    const thor::math::ThorOutput sol = d.qp.solve(d.in);
-    d.acc = sol.next_acc;
-    out.status = CoreOutput::Status::ok;
-    out.scaling = sol.next_scaling;
-    out.cbf = sol.cbf;
+    d.reference = d.in.next_target_q -
+                  (d.in.sampling_scaling * d.prediction_times(0)) * d.in.target_dq.head(n);
+    d.tube_error = (d.q - d.reference).cwiseAbs();
+    outside_tube = (d.tube_error.array() > d.config.tube_bound.array()).any();
+    out.tube_error = d.tube_error.maxCoeff();
   }
-  catch (const std::runtime_error &)
+
+  if (!d.obstacles_valid)
   {
-    // No solution: brake within the limits and stop the trajectory time.
-    d.acc = (-d.dq / dt).cwiseMax(-d.config.DDqmax).cwiseMin(d.config.DDqmax);
-    out.status = CoreOutput::Status::braking;
+    d.stop_active = true;
+    d.clear_time = 0.0;
+  }
+  if (!d.obstacles_valid || d.superviseStop(dt, still))
+  {
+    // Protective stop: no MPC, brake and hold.
+    d.brake(dt);
+    out.status = CoreOutput::Status::protective_stop;
     out.scaling = 0.0;
+    out.cbf = thor::math::CbfDiagnostics();
+  }
+  else
+  {
+    // Recovery (Eqs. 25-27): the temporary tube shrinks monotonically to the
+    // nominal one and ends when the robot is back inside it.
+    if (d.recovering)
+    {
+      d.tube_temp = d.config.tube_bound.cwiseMax(d.tube_temp.cwiseMin(d.tube_error));
+      if (!outside_tube) d.recovering = false;
+    }
+    if (d.recovering)
+    {
+      // Progress suspended: the reference stays where it is.
+      d.in.target_dq.setZero();
+      d.in.next_target_q = d.reference;
+      d.in.tube_bound = d.tube_temp;
+    }
+    else if (d.tube)
+    {
+      d.in.tube_bound = d.config.tube_bound;
+    }
+
+    try
+    {
+      const thor::math::ThorOutput sol = d.qp.solve(d.in);
+      d.acc = sol.next_acc;
+      out.status = d.recovering ? CoreOutput::Status::recovery : CoreOutput::Status::ok;
+      out.scaling = d.recovering ? 0.0 : sol.next_scaling;
+      out.cbf = sol.cbf;
+    }
+    catch (const std::runtime_error &)
+    {
+      // No solution: brake and stop the trajectory time. Once the robot is
+      // still outside the tube, the recovery starts (Eq. 25).
+      d.brake(dt);
+      out.status = CoreOutput::Status::braking;
+      out.scaling = 0.0;
+      if (d.tube && outside_tube && still && !d.recovering)
+      {
+        d.recovering = true;
+        d.tube_temp = d.config.tube_bound.cwiseMax(d.tube_error);
+      }
+    }
   }
   out.solve_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   if (d.config.cbf && out.cbf.frame_id < d.model.frames.size())

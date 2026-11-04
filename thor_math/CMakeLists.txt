@@ -20,6 +20,14 @@ endif()
 
 project(thor_math VERSION "${CMAKE_MATCH_1}" LANGUAGES CXX)
 
+# Without a build type CMake compiles without optimizations, and ThorQP::solve()
+# becomes ~150 times slower (colcon passes no build type by default). Use
+# Release unless a build type is given.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  message(STATUS "${PROJECT_NAME}: no build type given, using Release")
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 

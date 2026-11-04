@@ -403,6 +403,10 @@ builds with one linearization (see the example and section 3.1).
 
 ### 3.1 Performance
 
+The full record, with the reasons for each change, the equivalence tests,
+the cost of the algorithmic options and the measurement protocol, is in
+[performance.md](performance.md).
+
 Profile of one solve on the example scene before the optimizations below
 (discrete formulation, one linearization, Release build, AMD Ryzen 9
 5900HX):

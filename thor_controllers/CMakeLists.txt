@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
 project(thor_controllers LANGUAGES CXX)
 
+# Without a build type CMake compiles without optimizations, and ThorQP::solve()
+# becomes ~150 times slower (colcon passes no build type by default). Use
+# Release unless a build type is given.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  message(STATUS "${PROJECT_NAME}: no build type given, using Release")
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

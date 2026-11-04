@@ -135,6 +135,49 @@ protected:
   pinocchio::Model model_;
 };
 
+
+TEST_F(ThorQpIntegrationTest, RejectsNonfiniteObstacleData)
+{
+  auto config = baseConfig(1, 0.002, 0.002, false);
+  config.qmax = constant(kPi);
+  config.qmin = constant(-kPi);
+  config.Dqmax = constant(2.0);
+  config.DDqmax = constant(10.0);
+  config.cbf = true;
+  config.cbf_frame_ids = cbfFrameIds();
+  config.n_obstacle_points = 1;
+  ThorQP qp;
+  qp.setPinocchioModel(model_);
+  qp.configure(config);
+  ThorInput good;
+  good.x0 = Eigen::VectorXd::Zero(12);
+  good.target_dq = constant(0.0);
+  good.next_target_q = constant(0.0);
+  good.obstacle_pos = {Eigen::Vector3d::Constant(100.0)};
+  good.obstacle_vel = {Eigen::Vector3d::Zero()};
+  good.obstacle_acc = {Eigen::Vector3d::Zero()};
+  good.obstacle_axis = {Eigen::Vector3d::Zero()};
+  good.obstacle_radius = {0.0};
+  good.obstacle_delta_H = {0.0};
+  good.obstacle_sigma = {Eigen::Vector3d::Zero()};
+  for (double bad : {std::numeric_limits<double>::quiet_NaN(),
+                     std::numeric_limits<double>::infinity()}) {
+    for (int field = 0; field < 7; ++field) {
+      auto in = good;
+      switch (field) {
+        case 0: in.obstacle_pos[0].x() = bad; break;
+        case 1: in.obstacle_vel[0].x() = bad; break;
+        case 2: in.obstacle_acc[0].x() = bad; break;
+        case 3: in.obstacle_axis[0].x() = bad; break;
+        case 4: in.obstacle_radius[0] = bad; break;
+        case 5: in.obstacle_delta_H[0] = bad; break;
+        case 6: in.obstacle_sigma[0].x() = bad; break;
+      }
+      EXPECT_THROW(qp.solve(in), std::invalid_argument);
+    }
+  }
+}
+
 TEST_F(ThorQpIntegrationTest, LoadsUr10ModelAndIntermediateFrames)
 {
   EXPECT_EQ(model_.nq, 6);
@@ -1007,6 +1050,151 @@ TEST_F(ThorQpIntegrationTest, SimpleBoundsGiveTheSameSolutionAsGeneralRows)
     EXPECT_GT(cycles_with_active_bounds, 0);  // the simple bounds were exercised
     EXPECT_GT(redundant, 0);                  // and so was the reduction of the QP
   }
+}
+
+// Tube around the nominal path (ThorConfig::tube_bound). The reference at the
+// prediction times is rebuilt here from its definition: next_target_q at t_0,
+// then the nominal velocities integrated with the scalings of the solution.
+class TubeTest : public ThorQpIntegrationTest
+{
+protected:
+  ThorConfig tubeConfig() const
+  {
+    ThorConfig config = baseConfig(5, 0.2, 0.002, true);
+    config.qmax = constant(2.0 * kPi);
+    config.qmin = constant(-2.0 * kPi);
+    config.Dqmax = constant(3.0);
+    config.DDqmax = constant(20.0);
+    config.lambda_acc = 1e-6;
+    config.lambda_scaling = 1.0;
+    config.lambda_clik = 1.0;
+    config.min_scaling = 0.0;
+    config.max_scaling = 1.0;
+    return config;
+  }
+
+  // The robot at rest behind a reference that moves at full speed: to stay in
+  // a tight tube the QP must slow the reference down. All the joints move in
+  // the direction of sign, so that only one side of the tube is active.
+  ThorInput movingReference(const ThorConfig & config, double sign) const
+  {
+    const auto axes = static_cast<Eigen::Index>(model_.nv);
+    ThorInput in;
+    in.x0 = Eigen::VectorXd::Zero(2 * axes);
+    in.x0.head(axes) << 0.1, -1.2, 1.4, -0.9, -1.5, 0.2;
+    in.target_dq = Eigen::VectorXd::Zero(axes * config.n_intervals);
+    for (unsigned int i = 0; i < config.n_intervals; ++i)
+      in.target_dq.segment(axes * i, axes) = sign * (Eigen::VectorXd(axes) << 1.5, 1.0 + 0.2 * i, 0.8, 0.5, 0.5, 1.0).finished();
+    in.next_target_q = in.x0.head(axes) + 0.002 * in.target_dq.head(axes);
+    in.target_scaling = 1.0;
+    return in;
+  }
+
+  // Largest |q(t_i) - q_ref(t_i)| of the last solution, joint by joint.
+  static Eigen::VectorXd tubeError(InspectableOptimizer & qp, const ThorInput & in)
+  {
+    const Eigen::Index axes = in.next_target_q.size();
+    const Eigen::VectorXd t = qp.getPredictionTimeInstant();
+    const Eigen::Index nc = t.size();
+    const Eigen::VectorXd s = qp.solution().tail(nc);
+    // The reference now, then advanced at s_0 over the first interval.
+    Eigen::VectorXd reference = in.next_target_q - in.sampling_scaling * t(0) * in.target_dq.head(axes);
+    Eigen::VectorXd error = Eigen::VectorXd::Zero(axes);
+    for (Eigen::Index i = 0; i < nc; ++i) {
+      if (i == 0)
+        reference += s(0) * t(0) * in.target_dq.head(axes);
+      else
+        reference += s(i) * 0.5 * (in.target_dq.segment(axes * (i - 1), axes) + in.target_dq.segment(axes * i, axes)) *
+                     (t(i) - t(i - 1));
+      error = error.cwiseMax((qp.positions().segment(axes * i, axes) - reference).cwiseAbs());
+    }
+    return error;
+  }
+};
+
+TEST_F(TubeTest, KeepsThePredictionAroundTheScaledReference)
+{
+  // Both directions, so that both sides of the tube are exercised.
+  for (const double sign : {1.0, -1.0}) {
+    SCOPED_TRACE(sign > 0.0 ? "forward" : "backward");
+    ThorConfig config = tubeConfig();
+    const ThorInput in = movingReference(config, sign);
+
+    InspectableOptimizer free_qp;
+    free_qp.setPinocchioModel(model_);
+    free_qp.configure(config);
+    free_qp.setInitialState(in.x0);
+    free_qp.solve(in);
+
+    config.tube_bound = constant(0.002);
+    InspectableOptimizer qp;
+    qp.setPinocchioModel(model_);
+    qp.configure(config);
+    qp.setInitialState(in.x0);
+    ASSERT_NO_THROW(qp.solve(in));
+
+    // Without the tube the robot lags behind the reference; with it, it stays
+    // within the bound at every prediction time, by slowing the reference down.
+    EXPECT_GT(tubeError(free_qp, in).maxCoeff(), 0.01);
+    EXPECT_LE(tubeError(qp, in).maxCoeff(), 0.002 + 1e-8);
+    const auto nc = static_cast<Eigen::Index>(config.n_intervals);
+    EXPECT_LT(qp.solution().tail(nc).sum(), free_qp.solution().tail(nc).sum() - 0.5);
+
+    // A tube that is never reached does not change the solution.
+    config.tube_bound = constant(10.0);
+    InspectableOptimizer wide_qp;
+    wide_qp.setPinocchioModel(model_);
+    wide_qp.configure(config);
+    wide_qp.setInitialState(in.x0);
+    wide_qp.solve(in);
+    EXPECT_TRUE(wide_qp.solution().isApprox(free_qp.solution(), 1e-8));
+  }
+}
+
+// A state outside the tube makes the QP infeasible; a temporary bound in the
+// input (the recovery of the paper) makes it feasible again.
+TEST_F(TubeTest, OutsideTheTubeNeedsATemporaryBound)
+{
+  const auto axes = static_cast<Eigen::Index>(model_.nv);
+  ThorConfig config = tubeConfig();
+  config.tube_bound = constant(0.01);
+  InspectableOptimizer qp;
+  qp.setPinocchioModel(model_);
+  qp.configure(config);
+
+  ThorInput in;
+  in.x0 = Eigen::VectorXd::Zero(2 * axes);
+  in.x0.head(axes) << 0.1, -1.2, 1.4, -0.9, -1.5, 0.2;
+  in.target_dq = Eigen::VectorXd::Zero(axes * config.n_intervals);
+  in.next_target_q = in.x0.head(axes);
+  in.next_target_q(1) += 0.1;  // 0.1 rad away, at rest
+  qp.setInitialState(in.x0);
+  EXPECT_THROW(qp.solve(in), std::runtime_error);
+
+  in.tube_bound = constant(0.1 + 1e-3);
+  qp.setInitialState(in.x0);
+  ASSERT_NO_THROW(qp.solve(in));
+  EXPECT_LE(tubeError(qp, in).maxCoeff(), 0.1 + 1e-3 + 1e-8);
+
+  // Validation.
+  in.tube_bound = Eigen::VectorXd::Constant(axes - 1, 0.1);
+  EXPECT_THROW(qp.solve(in), std::invalid_argument);
+  in.tube_bound = constant(0.1);
+  in.tube_bound(2) = 0.0;
+  EXPECT_THROW(qp.solve(in), std::invalid_argument);
+
+  ThorConfig bad = tubeConfig();
+  bad.tube_bound = Eigen::VectorXd::Constant(axes - 1, 0.1);
+  EXPECT_THROW(qp.configure(bad), std::invalid_argument);
+  bad.tube_bound = constant(-0.1);
+  EXPECT_THROW(qp.configure(bad), std::invalid_argument);
+
+  // The per-cycle bound needs the tube enabled.
+  InspectableOptimizer no_tube;
+  no_tube.setPinocchioModel(model_);
+  no_tube.configure(tubeConfig());
+  in.tube_bound = constant(0.1);
+  EXPECT_THROW(no_tube.solve(in), std::invalid_argument);
 }
 
 TEST_F(ThorQpIntegrationTest, ComputesConstrainedStepWithoutCbf)

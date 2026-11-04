@@ -56,8 +56,33 @@ struct Obstacle
   Eigen::Vector3d sigma = Eigen::Vector3d::Constant(-1.0);
 };
 
+/// Protective stop on the measured distance (ISO 10218): below #distance the
+/// robot brakes at the acceleration limits, with all the joints stopping
+/// together along the current direction of motion, and then holds its
+/// position (category 2 stop: the motors stay powered). The MPC is not used
+/// while the stop is active, whatever the robot was doing, because escaping
+/// is not guaranteed to be fast enough.
+///
+/// The distance is the worst case over the perception errors, for every
+/// obstacle and robot sphere at the current state:
+/// `surface distance - delta_H - sigma_bound * sigma_position`.
+///
+/// The stop ends automatically when the robot is still and the distance has
+/// stayed at least #distance + #resume_margin for #resume_delay, as allowed by
+/// ISO/TS 15066 for speed and separation monitoring; the trajectory resumes
+/// from where it stopped. It needs robot spheres.
+struct ProtectiveStop
+{
+  bool enabled = true;
+  double distance = 0.0;       ///< [m] (>= 0); 0 means ThorConfig::C.
+  double resume_margin = 0.05; ///< Hysteresis before resuming [m] (>= 0).
+  double resume_delay = 0.5;   ///< Time with the distance restored before resuming [s] (>= 0).
+};
+
 /// Settings of ThorCore. The joint-related fields of #mpc (n_joints, limits)
 /// and the CBF frames are filled by ThorCore::configure() from the URDF.
+/// #mpc tube_bound, if given, is in the order of #joint_names; with it,
+/// ThorCore also runs the recovery of the tube (see CoreOutput::Status).
 struct CoreSettings
 {
   std::vector<std::string> joint_names;
@@ -69,6 +94,7 @@ struct CoreSettings
   StateFeedback state_feedback = StateFeedback::open_loop;
   /// Obstacles used by the MPC in each cycle (ThorConfig::n_obstacle_points).
   unsigned int max_obstacles = 4;
+  ProtectiveStop protective_stop;
 };
 
 /// Inputs of one cycle, in the order of CoreSettings::joint_names.
@@ -84,6 +110,10 @@ struct CoreInput
   /// Position of the nominal trajectory at the first prediction time.
   Eigen::VectorXd next_target_q;
   double target_scaling = 1.0;
+  /// Time scaling with which the targets were sampled: usually the scaling
+  /// applied in the last cycle (CoreOutput::scaling). See
+  /// ThorInput::sampling_scaling; it matters only with the tube.
+  double sampling_scaling = 1.0;
 };
 
 /// Result of one cycle, in the order of CoreSettings::joint_names: the state
@@ -93,7 +123,17 @@ struct CoreOutput
   enum class Status
   {
     ok,
-    braking,  ///< No solution: braking within the acceleration limits.
+    /// No solution: braking at the acceleration limits, all the joints
+    /// stopping together. If the robot stops outside the tube, a recovery
+    /// follows.
+    braking,
+    /// Protective stop (ProtectiveStop): braking, then holding still.
+    protective_stop,
+    /// Back into the tube after a stop (Eqs. 25-27 of the paper): the
+    /// trajectory time is stopped and the MPC moves the robot towards the
+    /// reference, with a temporary tube that shrinks monotonically to
+    /// ThorConfig::tube_bound.
+    recovery,
   };
 
   Status status = Status::ok;
@@ -107,6 +147,12 @@ struct CoreOutput
   /// Distance between the surfaces of the robot spheres and of the closest
   /// obstacle at the current state [m]; infinite without obstacles.
   double min_distance = std::numeric_limits<double>::infinity();
+  /// #min_distance reduced by the perception errors, as used by the
+  /// protective stop (ProtectiveStop) [m].
+  double guard_distance = std::numeric_limits<double>::infinity();
+  /// Largest |q - q_ref| over the joints, with q_ref the reference now [rad
+  /// or m]; 0 without the tube.
+  double tube_error = 0.0;
   /// The pair with the lowest barrier over the horizon: its distance may be
   /// on a predicted state of the nominal trajectory, not on the current one.
   thor::math::CbfDiagnostics cbf;
@@ -134,11 +180,13 @@ public:
 
   bool isConfigured() const;
 
-  /// Sets the integrated state, e.g. to the measured one on activation.
+  /// Sets the integrated state and clears stop/recovery history on activation.
   void reset(const Eigen::VectorXd & q, const Eigen::VectorXd & dq);
 
   /// Replaces the obstacles. More than max_obstacles are allowed: in each
-  /// cycle the closest to the robot are used. Not real-time safe if the
+  /// cycle the closest to the robot are used. Invalid geometry or non-finite
+  /// data forces braking until replaced by valid data, even with CBF/stop disabled.
+  /// Not real-time safe if the
   /// number of obstacles grows beyond the capacity of a previous call.
   void setObstacles(const std::vector<Obstacle> & obstacles);
 

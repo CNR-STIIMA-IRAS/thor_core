@@ -7,8 +7,10 @@
 
 #include <gmock/gmock.h>
 
+#include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -336,8 +338,12 @@ TEST(ThorCore, PerceptionSigmaPerObstacleOrDefault)
 
 TEST(ThorCore, BrakesWhenThereIsNoSolution)
 {
+  // The obstacle below is inside the tool: without this, the protective stop
+  // would take over (see ProtectiveStop*).
+  auto s = defaultSettings();
+  s.protective_stop.enabled = false;
   ThorCore core;
-  core.configure(readUrdf(), defaultSettings());
+  core.configure(readUrdf(), s);
   Eigen::VectorXd dq = Eigen::VectorXd::Zero(6);
   dq(0) = 2.0;
   core.reset(kHome, dq);
@@ -352,6 +358,212 @@ TEST(ThorCore, BrakesWhenThereIsNoSolution)
   EXPECT_NEAR(out.ddq(0), -10.0, 1e-12);
   EXPECT_NEAR(out.dq(0), 2.0 - 10.0 * kDt, 1e-12);
   EXPECT_EQ(out.ddq.tail(5).cwiseAbs().maxCoeff(), 0.0);
+}
+
+// Moves the base joint at speed v for `steps` cycles; returns the trajectory time.
+double moveBase(ThorCore & core, double v, int steps, double tau = 0.0)
+{
+  for (int k = 0; k < steps; ++k) tau += core.step(constantVelocityInput(core, kHome, tau, v)).scaling * kDt;
+  return tau;
+}
+
+// An obstacle `gap` from the surface of the tool sphere (radius 0.05), beyond
+// the tool along the wrist-tool direction, so that the tool is the closest
+// robot sphere.
+Obstacle beyondTheTool(ThorCore & core, double gap)
+{
+  const auto centers = core.sphereCenters();
+  const Eigen::Vector3d outward = (centers[3] - centers[2]).normalized();
+  Obstacle o;
+  o.position = centers[3] + (0.05 + gap) * outward;
+  return o;
+}
+
+// ISO 10218 protective stop: below the stop distance the robot brakes at the
+// acceleration limits, all the joints together, and holds still. It does so
+// even when it is not moving towards the obstacle (here the tool moves around
+// the base and the obstacle is beyond the tool, across its motion).
+TEST(ThorCore, ProtectiveStopBrakesTogetherAndHolds)
+{
+  ThorCore core;
+  core.configure(readUrdf(), defaultSettings());  // stop distance = C = 0.05 m
+  core.reset(kHome, Eigen::VectorXd());
+  const double tau = moveBase(core, 1.0, 250);
+  const Eigen::VectorXd dq0 = core.state().tail(6);
+  ASSERT_GT(dq0(0), 0.5);
+
+  core.setObstacles({beyondTheTool(core, 0.03)});
+  const CoreOutput & first = core.step(constantVelocityInput(core, kHome, tau, 1.0));
+  ASSERT_EQ(first.status, CoreOutput::Status::protective_stop);
+  EXPECT_NEAR(first.guard_distance, 0.03, 1e-3);
+  EXPECT_EQ(first.scaling, 0.0);
+  // Synchronized: the acceleration is opposite to the velocity, at the limit
+  // for the slowest joint and within it for the others.
+  const double ratio = first.ddq(0) / dq0(0);
+  EXPECT_LT(ratio, 0.0);
+  for (Eigen::Index j = 0; j < 6; ++j) {
+    EXPECT_NEAR(first.ddq(j), ratio * dq0(j), 1e-9) << "joint " << j;
+    EXPECT_LE(std::abs(first.ddq(j)), 10.0 + 1e-9);
+  }
+  EXPECT_NEAR(first.ddq.cwiseAbs().maxCoeff(), 10.0, 1e-9);
+
+  // Still within the braking time, then held.
+  const double braking_time = dq0.cwiseAbs().maxCoeff() / 10.0;
+  int k = 1;
+  for (; k < 1000 && core.state().tail(6).cwiseAbs().maxCoeff() > 0.0; ++k)
+    EXPECT_EQ(core.step(constantVelocityInput(core, kHome, tau, 1.0)).status, CoreOutput::Status::protective_stop);
+  EXPECT_LE(k * kDt, braking_time + 2 * kDt);
+  const Eigen::VectorXd held = core.state().head(6);
+  for (int i = 0; i < 200; ++i) {
+    const CoreOutput & out = core.step(constantVelocityInput(core, kHome, tau, 1.0));
+    EXPECT_EQ(out.status, CoreOutput::Status::protective_stop);
+    EXPECT_EQ(out.dq.cwiseAbs().maxCoeff(), 0.0);
+  }
+  EXPECT_EQ((core.state().head(6) - held).cwiseAbs().maxCoeff(), 0.0);
+}
+
+// The stop ends only with the distance restored beyond the hysteresis for the
+// resume delay; then the trajectory continues.
+TEST(ThorCore, ProtectiveStopResumesAfterTheDelay)
+{
+  auto s = defaultSettings();
+  s.protective_stop.resume_margin = 0.05;
+  s.protective_stop.resume_delay = 0.5;
+  ThorCore core;
+  core.configure(readUrdf(), s);
+  core.reset(kHome, Eigen::VectorXd());
+  const Obstacle near = beyondTheTool(core, 0.02);
+  core.setObstacles({near});
+  const CoreInput still = constantVelocityInput(core, kHome, 0.0, 0.0);
+  ASSERT_EQ(core.step(still).status, CoreOutput::Status::protective_stop);
+
+  // Within the hysteresis (0.05 to 0.10 m): still stopped.
+  core.setObstacles({beyondTheTool(core, 0.08)});
+  for (int i = 0; i < 500; ++i) ASSERT_EQ(core.step(still).status, CoreOutput::Status::protective_stop);
+
+  // Restored: stopped for the delay, then running.
+  core.setObstacles({beyondTheTool(core, 0.2)});
+  int cycles = 0;
+  while (cycles < 1000 && core.step(still).status == CoreOutput::Status::protective_stop) ++cycles;
+  EXPECT_NEAR(cycles * kDt, 0.5, 2 * kDt);
+  const double tau = moveBase(core, 0.5, 200);
+  EXPECT_GT(tau, 0.1);
+
+  // Invalid settings.
+  s.protective_stop.resume_delay = -1.0;
+  EXPECT_THROW(ThorCore().configure(readUrdf(), s), std::invalid_argument);
+}
+
+// The stop distance is the worst case over the perception errors.
+TEST(ThorCore, ProtectiveStopUsesPerceptionErrors)
+{
+  auto stopped = [](const Obstacle & o) {
+    ThorCore core;
+    core.configure(readUrdf(), defaultSettings());
+    core.reset(kHome, Eigen::VectorXd());
+    Obstacle placed = o;
+    placed.position = beyondTheTool(core, 0.08).position;
+    core.setObstacles({placed});
+    return core.step(constantVelocityInput(core, kHome, 0.0, 0.0)).status == CoreOutput::Status::protective_stop;
+  };
+  Obstacle o;
+  EXPECT_FALSE(stopped(o));  // 0.08 m > 0.05 m
+  o.delta_h = 0.04;          // 0.08 - 0.04 < 0.05
+  EXPECT_TRUE(stopped(o));
+  o.delta_h = 0.0;
+  o.sigma = Eigen::Vector3d(0.011, -1.0, -1.0);  // 0.08 - 3 * 0.011 < 0.05
+  EXPECT_TRUE(stopped(o));
+}
+
+// Tube recovery (Eqs. 25-27 of the paper): the robot stops outside the tube
+// (its braking distance is longer than the tube while the trajectory time is
+// stopped); when it may move again, it goes back to the reference with the
+// trajectory time still stopped, then the trajectory resumes.
+TEST(ThorCore, RecoversIntoTheTubeAfterAStop)
+{
+  auto s = defaultSettings();
+  s.mpc.tube_bound = Eigen::VectorXd::Constant(6, 0.05);
+  ThorCore core;
+  core.configure(readUrdf(), s);
+  core.reset(kHome, Eigen::VectorXd());
+  double tau = moveBase(core, 1.5, 300);
+
+  // Stop: braking from 1.5 rad/s at 10 rad/s^2 takes ~0.11 rad.
+  core.setObstacles({beyondTheTool(core, 0.02)});
+  for (int i = 0; i < 300; ++i) tau += core.step(constantVelocityInput(core, kHome, tau, 1.5)).scaling * kDt;
+  const CoreOutput & stopped = core.step(constantVelocityInput(core, kHome, tau, 1.5));
+  ASSERT_EQ(stopped.status, CoreOutput::Status::protective_stop);
+  ASSERT_GT(stopped.tube_error, 0.05);
+
+  core.setObstacles({});
+  bool recovered = false;
+  bool resumed = false;
+  double last_error = std::numeric_limits<double>::infinity();
+  for (int i = 0; i < 2000 && !resumed; ++i) {
+    const CoreOutput & out = core.step(constantVelocityInput(core, kHome, tau, 1.5));
+    tau += out.scaling * kDt;
+    if (out.status == CoreOutput::Status::recovery) {
+      recovered = true;
+      EXPECT_EQ(out.scaling, 0.0);
+      EXPECT_LE(out.tube_error, last_error + 1e-9);  // back towards the reference
+      last_error = out.tube_error;
+    }
+    if (recovered && out.status == CoreOutput::Status::ok && out.scaling > 0.5) {
+      resumed = true;
+      EXPECT_LE(out.tube_error, 0.05 + 1e-6);
+    }
+  }
+  EXPECT_TRUE(recovered);
+  EXPECT_TRUE(resumed);
+}
+
+// With a tube, the robot slows down along the path instead of deviating
+// around the person. The tube holds whenever the MPC has a solution; a
+// fallback braking may leave it, and the recovery brings the robot back.
+TEST(ThorCore, TubeLimitsTheDeviationAroundAnObstacle)
+{
+  ThorCore free_core;
+  free_core.configure(readUrdf(), defaultSettings(false));
+  free_core.reset(kHome, Eigen::VectorXd());
+  run(free_core, kHome, 0.8, 500);
+  Obstacle person;
+  person.position = free_core.sphereCenters().back();
+  person.radius = 0.1;
+  person.half_axis = Eigen::Vector3d(0.0, 0.0, 0.5);
+
+  auto settings = defaultSettings(true);
+  settings.protective_stop.enabled = false;  // only the MPC here
+  ThorCore deviating;
+  deviating.configure(readUrdf(), settings);
+  deviating.reset(kHome, Eigen::VectorXd());
+  deviating.setObstacles({person});
+  const RunResult free_run = run(deviating, kHome, 0.8, 1500);
+
+  constexpr double kTube = 0.05;
+  settings.mpc.tube_bound = Eigen::VectorXd::Constant(6, kTube);
+  ThorCore in_tube;
+  in_tube.configure(readUrdf(), settings);
+  in_tube.reset(kHome, Eigen::VectorXd());
+  in_tube.setObstacles({person});
+  double tau = 0.0, min_scaling = 1.0, min_distance = 1.0, max_ok_error = 0.0;
+  int fallback = 0;
+  for (int k = 0; k < 1500; ++k) {
+    const CoreOutput & out = in_tube.step(constantVelocityInput(in_tube, kHome, tau, 0.8));
+    tau += out.scaling * kDt;
+    min_scaling = std::min(min_scaling, out.scaling);
+    min_distance = std::min(min_distance, out.min_distance);
+    if (out.status == CoreOutput::Status::ok)
+      max_ok_error = std::max(max_ok_error, out.tube_error);
+    else
+      ++fallback;
+  }
+  std::cout << "without tube: deviation " << free_run.max_deviation << " rad, min scaling " << free_run.min_scaling
+            << "; with tube: max error " << max_ok_error << " rad when solved, " << fallback
+            << " braking or recovery cycles, min scaling " << min_scaling << "\n";
+  EXPECT_LE(max_ok_error, kTube + 1e-6);
+  EXPECT_GT(free_run.max_deviation, 3 * kTube);  // without the tube it goes around
+  EXPECT_LT(min_scaling, 0.1);                   // with it, it stops in front of the person
+  EXPECT_GT(min_distance, 0.0);
 }
 
 TEST(ThorCore, PositionFeedbackUsesMeasuredPosition)
@@ -374,6 +586,97 @@ TEST(ThorCore, PositionFeedbackUsesMeasuredPosition)
   open.reset(kHome, Eigen::VectorXd());
   in.next_target_q = kHome;
   EXPECT_NEAR(open.step(in).q(1), kHome(1), 1e-6);
+}
+
+
+TEST(ThorCore, ZeroResumeDelayStillRequiresClearanceAndRest)
+{
+  auto s = defaultSettings(false);
+  s.protective_stop.resume_delay = 0.0;
+  ThorCore core;
+  core.configure(readUrdf(), s);
+  core.reset(kHome, Eigen::VectorXd::Constant(6, 0.5));
+  auto in = constantVelocityInput(core, kHome, 0.0, 0.0);
+  core.setObstacles({beyondTheTool(core, 0.02)});
+  ASSERT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+  core.setObstacles({});
+  EXPECT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+  core.reset(kHome, Eigen::VectorXd());
+  core.setObstacles({beyondTheTool(core, 0.02)});
+  ASSERT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+  core.setObstacles({beyondTheTool(core, 0.08)});
+  EXPECT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+  core.setObstacles({});
+  EXPECT_EQ(core.step(in).status, CoreOutput::Status::ok);
+}
+
+TEST(ThorCore, ResetClearsStopDelayAndRecovery)
+{
+  auto s = defaultSettings(false);
+  s.mpc.tube_bound = Eigen::VectorXd::Constant(6, 0.01);
+  ThorCore core;
+  core.configure(readUrdf(), s);
+  core.reset(kHome, Eigen::VectorXd());
+  auto in = constantVelocityInput(core, kHome, 0.0, 0.0);
+  in.next_target_q(0) += 0.2;
+  ASSERT_EQ(core.step(in).status, CoreOutput::Status::braking);
+  ASSERT_EQ(core.step(in).status, CoreOutput::Status::recovery);
+  core.reset(kHome, Eigen::VectorXd());
+  EXPECT_EQ(core.step(in).status, CoreOutput::Status::braking);
+
+  in.next_target_q = kHome;
+  core.setObstacles({beyondTheTool(core, 0.02)});
+  ASSERT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+  core.setObstacles({});
+  for (int i = 0; i < 100; ++i)
+    ASSERT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+  core.reset(kHome, Eigen::VectorXd());
+  EXPECT_EQ(core.step(in).status, CoreOutput::Status::ok);
+  // A new stop must wait the full delay, including after a reset mid-delay.
+  core.setObstacles({beyondTheTool(core, 0.02)});
+  ASSERT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+  core.setObstacles({});
+  for (int i = 0; i < 200; ++i)
+    ASSERT_EQ(core.step(in).status, CoreOutput::Status::protective_stop);
+}
+
+TEST(ThorCore, InvalidObstaclesBrakeEvenWithoutCbfOrProtectiveStop)
+{
+  for (bool cbf : {false, true}) {
+    auto s = defaultSettings(cbf);
+    s.protective_stop.enabled = false;
+    for (int field = 0; field < 7; ++field) {
+      for (double bad : {std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity()}) {
+        ThorCore core;
+        core.configure(readUrdf(), s);
+        core.reset(kHome, Eigen::VectorXd::Constant(6, 0.5));
+        auto in = constantVelocityInput(core, kHome, 0.0, 0.5);
+        Obstacle o = beyondTheTool(core, 0.02);
+        switch (field) {
+          case 0: o.position.x() = bad; break;
+          case 1: o.velocity.x() = bad; break;
+          case 2: o.acceleration.x() = bad; break;
+          case 3: o.half_axis.x() = bad; break;
+          case 4: o.radius = bad; break;
+          case 5: o.delta_h = bad; break;
+          case 6: o.sigma.x() = bad; break;
+        }
+        core.setObstacles({o});
+        for (int i = 0; i < 100; ++i) {
+          const auto & out = core.step(in);
+          ASSERT_EQ(out.status, CoreOutput::Status::protective_stop);
+          EXPECT_EQ(out.scaling, 0.0);
+          EXPECT_TRUE(out.q.allFinite());
+          EXPECT_TRUE(out.ddq.allFinite());
+          EXPECT_LE(out.ddq.cwiseAbs().maxCoeff(), 10.0 + 1e-9);
+        }
+        EXPECT_LT(core.state().tail(6).norm(), 1e-9);
+        core.setObstacles({});
+        EXPECT_EQ(core.step(in).status, CoreOutput::Status::ok);
+      }
+    }
+  }
 }
 
 }  // namespace

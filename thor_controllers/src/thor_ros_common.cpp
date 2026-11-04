@@ -37,6 +37,16 @@ CoreSettings makeCoreSettings(
   if (c.DDqmax.size() == 0)
     throw std::invalid_argument("thor.limits.acceleration is required: one value per joint");
   c.position_bounds = p.limits.position_bounds;
+  if (!p.limits.tube.empty())
+  {
+    c.tube_bound = Eigen::Map<const Eigen::VectorXd>(p.limits.tube.data(), static_cast<Eigen::Index>(p.limits.tube.size()));
+    if (!(c.tube_bound.array() > 0.0).all())
+      throw std::invalid_argument("thor.limits.tube must be positive");
+  }
+  s.protective_stop.enabled = p.protective_stop.enabled;
+  s.protective_stop.distance = p.protective_stop.distance;
+  s.protective_stop.resume_margin = p.protective_stop.resume_margin;
+  s.protective_stop.resume_delay = p.protective_stop.resume_delay;
   c.min_scaling = p.limits.min_scaling;
   c.max_scaling = p.limits.max_scaling;
 
@@ -104,8 +114,11 @@ void ThorRosCore::configure(
   logger_ = node->get_logger();
   clock_ = node->get_clock();
   core_.configure(urdf, makeCoreSettings(params, joint_names, sampling_period));
-  obstacle_frame_ =
-    params.thor.obstacles.frame_id.empty() ? core_.rootFrame() : params.thor.obstacles.frame_id;
+  obstacle_frame_ = core_.rootFrame();
+  if (!params.thor.obstacles.frame_id.empty() && params.thor.obstacles.frame_id != obstacle_frame_)
+    throw std::invalid_argument(
+      "thor.obstacles.frame_id must match the robot model root frame '" + obstacle_frame_ +
+      "'; transform obstacle data into this frame before publishing");
 
   clearObstacles();
   obstacle_sub_ = node->create_subscription<thor_msgs::msg::ObstacleArray>(
@@ -161,8 +174,9 @@ void ThorRosCore::updateObstacles(const rclcpp::Time & now)
   still_obstacles_.assign(latest->obstacles.begin(), latest->obstacles.end());
   for (auto & o : still_obstacles_)
   {
-    o.velocity.setZero();
-    o.acceleration.setZero();
+    // Preserve invalid perception data so that a timeout cannot release its stop.
+    if (o.velocity.allFinite()) o.velocity.setZero();
+    if (o.acceleration.allFinite()) o.acceleration.setZero();
   }
   core_.setObstacles(still_obstacles_);
 }
@@ -173,12 +187,21 @@ void ThorRosCore::publishState(
   if (!rt_state_pub_ || !rt_state_pub_->can_publish()) return;
   auto & m = state_msg_;
   m.header.stamp = now;
-  m.status = out.status == CoreOutput::Status::ok ? thor_msgs::msg::ThorControllerState::STATUS_OK
-                                                   : thor_msgs::msg::ThorControllerState::STATUS_BRAKING;
+  switch (out.status)
+  {
+    case CoreOutput::Status::ok: m.status = thor_msgs::msg::ThorControllerState::STATUS_OK; break;
+    case CoreOutput::Status::braking: m.status = thor_msgs::msg::ThorControllerState::STATUS_BRAKING; break;
+    case CoreOutput::Status::protective_stop:
+      m.status = thor_msgs::msg::ThorControllerState::STATUS_PROTECTIVE_STOP;
+      break;
+    case CoreOutput::Status::recovery: m.status = thor_msgs::msg::ThorControllerState::STATUS_RECOVERY; break;
+  }
   m.scaling = out.scaling;
   m.solve_time = out.solve_time;
   m.n_obstacles = out.n_obstacles;
   m.min_distance = out.min_distance;
+  m.guard_distance = out.guard_distance;
+  m.tube_error = out.tube_error;
   m.obstacles_stale = obstacles_stale_;
   m.h_now = out.cbf.h_now;
   m.h_min = out.cbf.h_min;

@@ -291,6 +291,22 @@ struct ThorConfig
   bool   position_bounds = false;  ///< Adds position limits and the invariance constraint `K (q - qmin) + dq >= 0`, `K (qmax - q) - dq >= 0`, `K = 0.99 DDqmax/Dqmax`.
   double min_scaling     = 0.05;   ///< Lower bound of the time scaling of each interval.
   double max_scaling     = 1.01;   ///< Upper bound of the time scaling (>= #min_scaling).
+  /// Half-width of the tube around the nominal path, one value per joint [rad
+  /// or m] (> 0); empty disables the tube. At every prediction time `t_i`,
+  /// `|q(t_i) - q_ref(t_i)| <= tube_bound` joint by joint, with the reference
+  /// `q_ref(t_0) = next_target_q` and, after it, the nominal velocities
+  /// integrated with the time scalings of the intervals:
+  /// - `q_ref(t_0) = next_target_q + (s_0 - sigma) target_dq_0 t_0`, where
+  ///   `sigma` is ThorInput::sampling_scaling: `next_target_q - sigma
+  ///   target_dq_0 t_0` is the reference now, and the first interval advances
+  ///   it at `s_0`;
+  /// - `q_ref(t_i) = q_ref(t_{i-1}) + s_i (target_dq_{i-1} + target_dq_i)/2 (t_i - t_{i-1})`
+  ///   (trapezoidal rule).
+  /// The reference is affine in the scalings, so the QP can slow down to stay
+  /// in the tube instead of deviating (Method II of the paper, Eq. 20). A
+  /// state outside the tube makes the QP infeasible; see
+  /// ThorInput::tube_bound for a temporary bound during a recovery.
+  Eigen::VectorXd tube_bound;
   /// @}
 
   /// @name Control barrier function
@@ -306,11 +322,11 @@ struct ThorConfig
   double cbf_linearization_tolerance = 0.0;  ///< Stop re-linearizing when `|u* - u_ref|_inf` is not above this value [rad/s^2] (>= 0); 0 never stops early.
   double a_s     = 0.0;    ///< Robot braking deceleration in the `d_min` formula [m/s^2] (> 0).
   double T_r     = 0.0;    ///< Reaction time before braking [s] (>= 0).
-  double C       = 0.0;    ///< Safety margin `C_0` between the robot and obstacle surfaces [m] (> 0).
+  double C       = 0.0;    ///< Safety margin `C` between the robot and obstacle surfaces [m] (> 0): what the perception bounds do not cover, i.e. `C_0` (static uncertainty) + the obstacle model error + the closure of a missed cycle (docs/robust_cbf_method.md §6).
   double C_escape = 0.0;   ///< Scale of the escape term of the barrier [m] (>= 0); 0 means #C. The term starts at `d_min = C` and has slope `T_r v_r / C_escape`; a larger value keeps `h` increasing in `d_min` up to a robot speed of `C_escape / T_r` (see cbf::barrier()).
   double gamma   = 0.0;    ///< Class-K gain of `dh/dt + gamma h >= 0` [1/s].
   double delta_H = 0.0;    ///< Default distance estimation error [m] (>= 0), used when ThorInput::obstacle_delta_H is empty. The barrier is evaluated at the worst-case distance, i.e. the obstacle is inflated by delta_H; see cbf::perceptionMargin(). Do not count the same noise here and in #obstacle_sigma.
-  Eigen::Vector3d obstacle_sigma = Eigen::Vector3d::Zero();  ///< Default standard deviations of the obstacle position [m], velocity [m/s] and acceleration [m/s^2] (>= 0), used when ThorInput::obstacle_sigma is empty. The barrier is evaluated at the worst corner of the box of #sigma_bound standard deviations, extrapolated to each prediction time (see docs/worst_case_h_design.md).
+  Eigen::Vector3d obstacle_sigma = Eigen::Vector3d::Zero();  ///< Default standard deviations of the obstacle position [m], velocity [m/s] and acceleration [m/s^2] (>= 0), used when ThorInput::obstacle_sigma is empty. The barrier is evaluated at the worst corner of the box of #sigma_bound standard deviations, extrapolated to each prediction time (see docs/robust_cbf_method.md).
   double sigma_bound = 3.0;  ///< Number of standard deviations of the perception box (>= 0).
   bool   cbf_robust_rate = false;  ///< CbfFormulation::continuous only: also subtracts the bound of the error of `dh/dt` caused by #obstacle_sigma (cbf::BarrierTerms::rate_bound). The discrete formulation constrains `h` at every node and does not need it.
   double cbf_activation_distance = 5.0;  ///< If the lowest barrier over the horizon is above this value [m], the CBF rows are dropped from the QP.
@@ -353,6 +369,8 @@ struct ThorInput
   std::vector<double> obstacle_delta_H;       ///< Distance estimation error of each point [m] (>= 0), added to its radius by the barrier; empty means ThorConfig::delta_H for all.
   std::vector<Eigen::Vector3d> obstacle_axis; ///< Capsule half axes [m]: the axis goes from `obstacle_pos - obstacle_axis` to `obstacle_pos + obstacle_axis`, fixed in orientation. Zero for a sphere; empty means spheres for all.
   std::vector<Eigen::Vector3d> obstacle_sigma; ///< Standard deviations of the position [m], velocity [m/s] and acceleration [m/s^2] of each point (>= 0); empty means ThorConfig::obstacle_sigma for all.
+  Eigen::VectorXd tube_bound;  ///< Tube half-width of this cycle, one value per joint (> 0); empty means ThorConfig::tube_bound. Used for the temporary bound of a recovery (Eqs. 25-26 of the paper). Only with the tube enabled.
+  double          sampling_scaling = 1.0;  ///< Time scaling with which #next_target_q and #target_dq were sampled (at `tau + sampling_scaling t_i`, usually the scaling applied in the last cycle). Used only by the tube (ThorConfig::tube_bound), to move the reference of the first interval with the new scaling.
 };
 
 /**
@@ -499,6 +517,8 @@ class ThorQP
     Eigen::Vector3d    m_obstacle_sigma = Eigen::Vector3d::Zero();  // default perception standard deviations
     double             m_sigma_bound = 3.0;  // standard deviations of the perception box
     bool               m_cbf_robust_rate = false;  // bound of the dh/dt error (continuous only)
+    Eigen::VectorXd    m_tube_bound;          // default tube half-width; empty: no tube
+    Eigen::Index       m_tube_col = 0;        // first column of the tube rows in m_CI
     double             m_h;               // barrier value
     int                m_n_obstacle_points; // number of obstacle points considered
     std::vector<unsigned int> m_frameIds;
@@ -589,6 +609,9 @@ class ThorQP
 
     /// @brief As buildDiscreteCbf(), with the CbfFormulation::continuous constraints.
     void buildContinuousCbf( const ThorInput& in, Eigen::VectorXd& ci0, CbfDiagnostics& diag );
+
+    /// @brief Fills the scaling part of the tube rows of `m_CI` and their offsets in @p ci0 (see ThorConfig::tube_bound).
+    void buildTube( const ThorInput& in, Eigen::VectorXd& ci0 );
 
     /// @brief Legacy return value: `{h_min, interval, frame_id, distance, v_robot, v_obstacle}`.
     static std::vector<double> toLegacyDiagnostics( const CbfDiagnostics& cbf );
@@ -681,6 +704,8 @@ class ThorQP
         m_obstacle_sigma = other.m_obstacle_sigma;
         m_sigma_bound = other.m_sigma_bound;
         m_cbf_robust_rate = other.m_cbf_robust_rate;
+        m_tube_bound = other.m_tube_bound;
+        m_tube_col = other.m_tube_col;
 
         m_use_cbf = other.m_use_cbf;
         m_model = other.m_model;
