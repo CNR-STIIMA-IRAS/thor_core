@@ -148,7 +148,7 @@ all'estremo mobile `T_f`, che dipende da `v_r∥`.
 
 Siano
 
-$$
+```math
 \Delta_s(\psi) = d_{\min}(\psi) - C,
 \qquad
 H(x) =
@@ -156,68 +156,68 @@ H(x) =
 1 & x > 0\\
 0 & x \le 0
 \end{cases}
-$$
+```
 
 lo scarto dal margine e la funzione di Heaviside. La barriera è
 
-$$
+```math
 h(\psi) = \Delta_s \left( 1 - H(-\Delta_s)\,\frac{T_r\, v_{r\parallel}}{C_e} \right)
 =
 \begin{cases}
 \Delta_s & \Delta_s \ge 0 \quad \text{(fuori dal margine)}\\[4pt]
 \Delta_s \left( 1 - \dfrac{T_r\, v_{r\parallel}}{C_e} \right) & \Delta_s < 0 \quad \text{(dentro il margine)}
 \end{cases}
-$$
+```
 
-e il safe set è $\mathcal{S} = \{\psi : h(\psi) \ge 0\}$. In $\Delta_s = 0$ il
-fattore $\Delta_s$ annulla il prodotto, quindi la convenzione su $H(0)$ non
-cambia $h$. 
+e il safe set è $`\mathcal{S} = \{\psi : h(\psi) \ge 0\}`$. In $`\Delta_s = 0`$ il
+fattore $`\Delta_s`$ annulla il prodotto, quindi la convenzione su $`H(0)`$ non
+cambia $`h`$. 
 
 Il termine di escape serve a dare autorità di controllo dentro il margine.
-Senza di esso, per un robot fermo con $d_{\min} = d$ si avrebbe
-$\partial h / \partial v_{r\parallel} = 0$, cioè $L_g h = 0$: il robot non
+Senza di esso, per un robot fermo con $`d_{\min} = d`$ si avrebbe
+$`\partial h / \partial v_{r\parallel} = 0`$, cioè $`L_g h = 0`$: il robot non
 potrebbe agire sulla barriera.
 
 ### 3.2 Proprietà
 
-**Continuità.** $h$ è continua, perché entrambi i rami valgono $0$ in
-$\Delta_s = 0$. Non è differenziabile in $\Delta_s = 0$ quando
-$v_{r\parallel} \neq 0$: la derivata in $d_{\min}$ vale $1$ da destra e
-$1 - T_r v_{r\parallel}/C_e$ da sinistra. Il codice usa il ramo esterno in
-$\Delta_s = 0$, cioè la derivata destra.
+**Continuità.** $`h`$ è continua, perché entrambi i rami valgono $`0`$ in
+$`\Delta_s = 0`$. Non è differenziabile in $`\Delta_s = 0`$ quando
+$`v_{r\parallel} \neq 0`$: la derivata in $`d_{\min}`$ vale $`1`$ da destra e
+$`1 - T_r v_{r\parallel}/C_e`$ da sinistra. Il codice usa il ramo esterno in
+$`\Delta_s = 0`$, cioè la derivata destra.
 
-**Derivate.** Per $\Delta_s \neq 0$:
+**Derivate.** Per $`\Delta_s \neq 0`$:
 
-$$
+```math
 \frac{\partial h}{\partial d_{\min}} = 1 - H(-\Delta_s)\,\frac{T_r\, v_{r\parallel}}{C_e},
 \qquad
 \left.\frac{\partial h}{\partial v_{r\parallel}}\right|_{d_{\min}} = -H(-\Delta_s)\,\frac{T_r\,\Delta_s}{C_e} \;\ge\; 0
-$$
+```
 
 e il gradiente rispetto a ψ è
 
-$$
+```math
 \nabla_\psi h = \frac{\partial h}{\partial d_{\min}}\,\nabla_\psi d_{\min}
 + \left.\frac{\partial h}{\partial v_{r\parallel}}\right|_{d_{\min}} e_2,
-$$
+```
 
-con $\nabla_\psi d_{\min}$ dal §2.3 ed $e_2$ il versore della componente
-$v_{r\parallel}$. Dentro il margine $\partial h/\partial d_{\min} < 0$ per
-$v_{r\parallel} > C_e/T_r$: in quel regime una $d_{\min}$ più piccola dà una
-$h$ più grande. È un artefatto del termine di escape.
+con $`\nabla_\psi d_{\min}`$ dal §2.3 ed $`e_2`$ il versore della componente
+$`v_{r\parallel}`$. Dentro il margine $`\partial h/\partial d_{\min} < 0`$ per
+$`v_{r\parallel} > C_e/T_r`$: in quel regime una $`d_{\min}`$ più piccola dà una
+$`h`$ più grande. È un artefatto del termine di escape.
 
-**Safe set.** $\psi \in \mathcal{S}$ se e solo se $\Delta_s \ge 0$ oppure
-$T_r v_{r\parallel} \ge C_e$.
+**Safe set.** $`\psi \in \mathcal{S}`$ se e solo se $`\Delta_s \ge 0`$ oppure
+$`T_r v_{r\parallel} \ge C_e`$.
 
-*Dimostrazione.* Se $\Delta_s \ge 0$, $h = \Delta_s \ge 0$. Se $\Delta_s < 0$,
-$h = \Delta_s (1 - T_r v_{r\parallel}/C_e)$ è non negativa se e solo se
-$1 - T_r v_{r\parallel}/C_e \le 0$. ∎
+*Dimostrazione.* Se $`\Delta_s \ge 0`$, $`h = \Delta_s \ge 0`$. Se $`\Delta_s < 0`$,
+$`h = \Delta_s (1 - T_r v_{r\parallel}/C_e)`$ è non negativa se e solo se
+$`1 - T_r v_{r\parallel}/C_e \le 0`$. ∎
 
-Il bordo $\partial\mathcal{S} = \{h = 0\}$ è quindi l'unione di due insiemi:
-$\{\Delta_s = 0\}$, dove il termine di escape si attiva, e
-$\{\Delta_s < 0,\ T_r v_{r\parallel} = C_e\}$, cioè gli stati dentro il margine
+Il bordo $`\partial\mathcal{S} = \{h = 0\}`$ è quindi l'unione di due insiemi:
+$`\{\Delta_s = 0\}`$, dove il termine di escape si attiva, e
+$`\{\Delta_s < 0,\ T_r v_{r\parallel} = C_e\}`$, cioè gli stati dentro il margine
 che si allontanano esattamente alla velocità di fuga. Appena dentro il
-margine, $\partial h/\partial v_{r\parallel}|_{d_{\min}} = (C - d_{\min})\,T_r/C_e > 0$:
+margine, $`\partial h/\partial v_{r\parallel}|_{d_{\min}} = (C - d_{\min})\,T_r/C_e > 0`$:
 un robot entrato nel margine ha sempre autorità di controllo per uscirne
 (Osservazione del §3.3). Questa proprietà evita il deadlock
 ([robust_margin_deadlock.md](robust_margin_deadlock.md)).
@@ -226,86 +226,86 @@ un robot entrato nel margine ha sempre autorità di controllo per uscirne
 
 Siano
 
-$$
+```math
 v_e = \frac{C_e}{T_r},
 \qquad
 \varepsilon = \frac{T_r\, v_{r\parallel}}{C_e} = \frac{v_{r\parallel}}{v_e}
-$$
+```
 
 la **velocità di fuga** e la velocità di allontanamento normalizzata. Dentro il
 margine
 
-$$
+```math
 h = -\underbrace{(C - d_{\min})}_{\text{penetrazione} \,>\, 0}\,(1 - \varepsilon),
 \qquad
 \frac{\partial h}{\partial d_{\min}} = 1 - \varepsilon .
-$$
+```
 
-$T_r v_{r\parallel}$ è la distanza di cui il robot si allontana durante il tempo
-di reazione, se mantiene la velocità attuale. $C_e$ è quindi una **distanza di
-fuga**: dentro il margine la barriera confronta questa distanza con $C_e$. Ne
+$`T_r v_{r\parallel}`$ è la distanza di cui il robot si allontana durante il tempo
+di reazione, se mantiene la velocità attuale. $`C_e`$ è quindi una **distanza di
+fuga**: dentro il margine la barriera confronta questa distanza con $`C_e`$. Ne
 seguono tre regimi:
 
-| Regime | Robot | $h$ dentro il margine | $\partial h / \partial d_{\min}$ |
+| Regime | Robot | $`h`$ dentro il margine | $`\partial h / \partial d_{\min}`$ |
 |---|---|---|---|
-| $\varepsilon < 1$ | si avvicina, è fermo o si allontana più lento di $v_e$ | $< 0$: stato non sicuro | $> 0$: $h$ cresce allontanandosi |
-| $\varepsilon = 1$ | si allontana a $v_e$ | $= 0$: sul bordo di $\mathcal{S}$ | $= 0$ |
-| $\varepsilon > 1$ | si allontana più veloce di $v_e$ | $> 0$: stato sicuro | $< 0$: artefatto del §3.2 |
+| $`\varepsilon < 1`$ | si avvicina, è fermo o si allontana più lento di $`v_e`$ | $`< 0`$: stato non sicuro | $`> 0`$: $`h`$ cresce allontanandosi |
+| $`\varepsilon = 1`$ | si allontana a $`v_e`$ | $`= 0`$: sul bordo di $`\mathcal{S}`$ | $`= 0`$ |
+| $`\varepsilon > 1`$ | si allontana più veloce di $`v_e`$ | $`> 0`$: stato sicuro | $`< 0`$: artefatto del §3.2 |
 
-Il regime $\varepsilon \le 1$ è anche quello in cui vale la parte (2) della
+Il regime $`\varepsilon \le 1`$ è anche quello in cui vale la parte (2) della
 Proposizione 1 (§5.4).
 
-$C_e$ cambia solo la pendenza del termine, non il punto in cui si attiva, che
-resta $\Delta_s = 0$. Con $C_e = C$ (il default) si ha $v_e = C/T_r$. Con
-$T_r = 0.15\ \text{s}$ vale $1.67\ \text{m/s}$ per $C = 0.25\ \text{m}$, ma solo
-$0.4\ \text{m/s}$ per $C = 0.06\ \text{m}$. Separare $C_e$ da $C$ permette di
-ridurre il margine senza portare $v_e$ alle velocità di lavoro.
+$`C_e`$ cambia solo la pendenza del termine, non il punto in cui si attiva, che
+resta $`\Delta_s = 0`$. Con $`C_e = C`$ (il default) si ha $`v_e = C/T_r`$. Con
+$`T_r = 0.15\ \text{s}`$ vale $`1.67\ \text{m/s}`$ per $`C = 0.25\ \text{m}`$, ma solo
+$`0.4\ \text{m/s}`$ per $`C = 0.06\ \text{m}`$. Separare $`C_e`$ da $`C`$ permette di
+ridurre il margine senza portare $`v_e`$ alle velocità di lavoro.
 
 **Osservazione (accelerazione minima di fuga).** Siano robot e ostacolo fermi
-($v_r = v_o = a_o = 0$), con $T_r > 0$ e $d < C$. Allora la condizione continua
+($`v_r = v_o = a_o = 0`$), con $`T_r > 0`$ e $`d < C`$. Allora la condizione continua
 del §4.2 vale se e solo se
 
-$$
+```math
 u \cdot a_r \;\ge\; \gamma\,\frac{C_e}{T_r}.
-$$
+```
 
-*Dimostrazione.* Con tutto fermo $d(\tau) = d$ sulla finestra $[0, T_r]$,
-quindi $d_{\min} = d$ e $\Delta_s = d - C < 0$. Il codice prende il minimo in
-$\tau = 0$, dunque $\partial d_{\min}/\partial v_{r\parallel} = 0$ (derivata
-destra; $d_{\min}$ non è differenziabile in $v_{r\parallel} = 0$). Allora
-$h = -(C - d)$ e $L_g h = (C - d)\,(T_r/C_e)\,u$. Tutte le componenti di
-$\dot\psi_f$ del §4.1 sono nulle, quindi $L_f h = 0$. La condizione
-$L_g h \cdot a_r + L_f h + \gamma h \ge 0$ diventa
+*Dimostrazione.* Con tutto fermo $`d(\tau) = d`$ sulla finestra $`[0, T_r]`$,
+quindi $`d_{\min} = d`$ e $`\Delta_s = d - C < 0`$. Il codice prende il minimo in
+$`\tau = 0`$, dunque $`\partial d_{\min}/\partial v_{r\parallel} = 0`$ (derivata
+destra; $`d_{\min}`$ non è differenziabile in $`v_{r\parallel} = 0`$). Allora
+$`h = -(C - d)`$ e $`L_g h = (C - d)\,(T_r/C_e)\,u`$. Tutte le componenti di
+$`\dot\psi_f`$ del §4.1 sono nulle, quindi $`L_f h = 0`$. La condizione
+$`L_g h \cdot a_r + L_f h + \gamma h \ge 0`$ diventa
 
-$$
+```math
 (C - d)\,\frac{T_r}{C_e}\,(u \cdot a_r) - \gamma\,(C - d) \ge 0,
-$$
+```
 
-e la tesi segue dividendo per $(C - d)\,T_r/C_e > 0$. ∎
+e la tesi segue dividendo per $`(C - d)\,T_r/C_e > 0`$. ∎
 
-L'accelerazione richiesta non dipende dalla penetrazione e cresce con $C_e$.
-Se supera l'accelerazione cartesiana disponibile lungo $u$, il QP è infeasible
+L'accelerazione richiesta non dipende dalla penetrazione e cresce con $`C_e`$.
+Se supera l'accelerazione cartesiana disponibile lungo $`u`$, il QP è infeasible
 e il robot resta bloccato nel margine.
 
-**Scelta di $C_e$.** Sia $v_{\text{fuga}}$ la velocità di allontanamento
-tipica da tenere nel regime $\varepsilon \le 1$, e $a_{\text{fuga}}$
+**Scelta di $`C_e`$.** Sia $`v_{\text{fuga}}`$ la velocità di allontanamento
+tipica da tenere nel regime $`\varepsilon \le 1`$, e $`a_{\text{fuga}}`$
 l'accelerazione cartesiana disponibile per allontanarsi. Le due condizioni
 danno
 
-$$
+```math
 T_r\, v_{\text{fuga}} \;\le\; C_e \;\le\; \frac{T_r\, a_{\text{fuga}}}{\gamma}.
-$$
+```
 
 Se l'intervallo è vuoto, conta il limite superiore: un robot che non riesce a
 uscire dal margine è peggio di una barriera non monotona a velocità elevate.
 
 ![h in funzione di d_min con due valori di C_escape](figures/fig_escape.svg)
 
-*Figura 2. Barriera per un robot che si allontana a $0.6\ \text{m/s}$ con
-$C = 0.06\ \text{m}$ e $T_r = 0.15\ \text{s}$, cioè
-$T_r v_{r\parallel} = 0.09\ \text{m}$. Con $C_e = C$ si ha $\varepsilon = 1.5$:
-dentro il margine $h > 0$ e la pendenza è negativa. Con $C_e = 0.25\ \text{m}$
-si ha $\varepsilon = 0.36$: $h < 0$ e la pendenza è positiva. Fuori dal
+*Figura 2. Barriera per un robot che si allontana a $`0.6\ \text{m/s}`$ con
+$`C = 0.06\ \text{m}`$ e $`T_r = 0.15\ \text{s}`$, cioè
+$`T_r v_{r\parallel} = 0.09\ \text{m}`$. Con $`C_e = C`$ si ha $`\varepsilon = 1.5`$:
+dentro il margine $`h > 0`$ e la pendenza è negativa. Con $`C_e = 0.25\ \text{m}`$
+si ha $`\varepsilon = 0.36`$: $`h < 0`$ e la pendenza è positiva. Fuori dal
 margine le due curve coincidono.*
 
 ---
